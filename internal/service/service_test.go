@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,8 +106,10 @@ func TestSortSelectionFeed(t *testing.T) {
 }
 
 func TestSortSelectionHTML(t *testing.T) {
+	thumbDir := t.TempDir()
 	s := service.OPDS{
 		TrustedRoot:      "testdata",
+		ThumbDir:         thumbDir,
 		HideCalibreFiles: true,
 		HideDotFiles:     true,
 		EnableHTML:       true,
@@ -129,6 +133,14 @@ func TestSortSelectionHTML(t *testing.T) {
 	assert.Contains(t, string(body), `href="/mybook?sort=name"`)
 	assert.Contains(t, string(body), `href="/mybook?sort=date"`)
 	assert.NotContains(t, string(body), "mybook.epub")
+
+	cacheFiles, err := filepath.Glob(filepath.Join(thumbDir, "static-xml", "*.xml"))
+	require.NoError(t, err)
+	require.Len(t, cacheFiles, 1)
+	cachedXML, err := os.ReadFile(cacheFiles[0])
+	require.NoError(t, err)
+	assert.Contains(t, string(cachedXML), "<feed")
+	assert.Contains(t, string(cachedXML), "By Date Added")
 }
 
 func TestSortSelectionHTMLBypassesConditionalCache(t *testing.T) {

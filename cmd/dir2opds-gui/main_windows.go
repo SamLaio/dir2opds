@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -84,6 +85,10 @@ var (
 	currentURL    string
 	wndProcAddr   uintptr
 )
+
+type launcherSettings struct {
+	BooksFolder string `json:"books_folder"`
+}
 
 type wndClassEx struct {
 	cbSize        uint32
@@ -175,6 +180,7 @@ func wndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
 		case idBrowse:
 			if folder := browseFolder(hwnd); folder != "" {
 				setText(control(hwnd, idFolder), folder)
+				saveSettings(launcherSettings{BooksFolder: folder})
 			}
 		case idStart:
 			startServer(hwnd)
@@ -185,6 +191,7 @@ func wndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
 		}
 		return 0
 	case wmClose:
+		saveCurrentSettings(hwnd)
 		stopServer(hwnd)
 		procDestroyWindow.Call(hwnd)
 		return 0
@@ -227,6 +234,7 @@ func startServer(hwnd uintptr) {
 	if port == "" {
 		port = "8080"
 	}
+	saveSettings(launcherSettings{BooksFolder: folder})
 
 	cfg := server.DefaultConfig()
 	cfg.Host = "0.0.0.0"
@@ -311,6 +319,10 @@ func browseFolder(hwnd uintptr) string {
 }
 
 func defaultBooksDir() string {
+	if settings, err := loadSettings(); err == nil && settings.BooksFolder != "" {
+		return settings.BooksFolder
+	}
+
 	wd, err := os.Getwd()
 	if err != nil {
 		return ""
@@ -320,6 +332,54 @@ func defaultBooksDir() string {
 		return books
 	}
 	return wd
+}
+
+func saveCurrentSettings(hwnd uintptr) {
+	folder := getText(control(hwnd, idFolder))
+	if folder == "" {
+		return
+	}
+	saveSettings(launcherSettings{BooksFolder: folder})
+}
+
+func settingsPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	dir = filepath.Join(dir, "dir2opds")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "launcher.json"), nil
+}
+
+func loadSettings() (launcherSettings, error) {
+	path, err := settingsPath()
+	if err != nil {
+		return launcherSettings{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return launcherSettings{}, err
+	}
+	var settings launcherSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return launcherSettings{}, err
+	}
+	return settings, nil
+}
+
+func saveSettings(settings launcherSettings) {
+	path, err := settingsPath()
+	if err != nil {
+		return
+	}
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0o644)
 }
 
 func createWindow(exStyle uint32, className, title string, style uint32, x, y, width, height int32, parent, menu uintptr) uintptr {

@@ -104,6 +104,7 @@ func NewHandler(cfg Config) (http.Handler, string, error) {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/favicon.ico", faviconHandler)
 	mux.HandleFunc("/", errorHandler(s.Handler))
 	mux.HandleFunc("/health", service.HealthHandler)
 	if cfg.EnableSearch {
@@ -120,7 +121,13 @@ func NewHandler(cfg Config) (http.Handler, string, error) {
 		handler = service.GzipMiddleware(handler)
 	}
 
+	s.WarmBookIndex()
+
 	return handler, absolutePath, nil
+}
+
+func faviconHandler(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // NewHTTPServer creates an HTTP server and returns its URL.

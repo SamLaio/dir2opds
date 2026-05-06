@@ -1,11 +1,14 @@
 package service
 
 import (
+	"bytes"
+	"encoding/xml"
 	"fmt"
 	"html/template"
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -258,6 +261,29 @@ type HTMLData struct {
 	NextPageURL  string
 }
 
+type staticXMLFeed struct {
+	Title   string           `xml:"title"`
+	Links   []staticXMLLink  `xml:"link"`
+	Entries []staticXMLEntry `xml:"entry"`
+}
+
+type staticXMLEntry struct {
+	Title  string          `xml:"title"`
+	Author *staticXMLText  `xml:"author"`
+	Links  []staticXMLLink `xml:"link"`
+}
+
+type staticXMLText struct {
+	Name string `xml:"name"`
+}
+
+type staticXMLLink struct {
+	Rel   string `xml:"rel,attr"`
+	Title string `xml:"title,attr"`
+	Href  string `xml:"href,attr"`
+	Type  string `xml:"type,attr"`
+}
+
 func (s OPDS) renderHTML(w http.ResponseWriter, req *http.Request, catalog *Catalog) error {
 	tmpl, err := template.New("catalog").Parse(htmlTemplate)
 	if err != nil {
@@ -331,6 +357,128 @@ func (s OPDS) renderHTML(w http.ResponseWriter, req *http.Request, catalog *Cata
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	return tmpl.Execute(w, data)
+}
+
+func (s OPDS) renderHTMLFromXML(w http.ResponseWriter, req *http.Request, content []byte) error {
+	var feed staticXMLFeed
+	decoder := xml.NewDecoder(bytes.NewReader(content))
+	if err := decoder.Decode(&feed); err != nil {
+		return err
+	}
+
+	page := parsePage(req.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+
+	catalog := &Catalog{
+		ID:       req.URL.Path,
+		Title:    feed.Title,
+		Page:     page,
+		PageSize: len(feed.Entries),
+		Total:    len(feed.Entries),
+	}
+	data := HTMLData{
+		Catalog:      catalog,
+		EnableSearch: s.EnableSearch,
+		Query:        req.URL.Query().Get("q"),
+		CurrentPage:  page,
+		TotalPages:   page,
+	}
+
+	for _, link := range feed.Links {
+		switch link.Rel {
+		case "previous":
+			data.PrevPageURL = link.Href
+		case "next":
+			data.NextPageURL = link.Href
+			if data.TotalPages <= page {
+				data.TotalPages = page + 1
+			}
+		case "last":
+			if lastPage := pageFromURL(link.Href); lastPage > 0 {
+				data.TotalPages = lastPage
+			}
+		}
+	}
+
+	urlPath := strings.Trim(req.URL.Path, "/")
+	if urlPath != "" {
+		parts := strings.Split(urlPath, "/")
+		current := ""
+		for _, part := range parts {
+			current += "/" + part
+			data.Breadcrumbs = append(data.Breadcrumbs, Breadcrumb{
+				Name: part,
+				Path: current,
+			})
+		}
+	}
+
+	for _, entry := range feed.Entries {
+		htmlEntry := HTMLEntry{
+			CatalogEntry: CatalogEntry{
+				Name:  entry.Title,
+				Title: entry.Title,
+			},
+			Href: "#",
+		}
+		if entry.Author != nil {
+			htmlEntry.Author = entry.Author.Name
+		}
+		for _, link := range entry.Links {
+			href := s.htmlHref(link.Href)
+			switch {
+			case link.Rel == "subsection":
+				htmlEntry.Type = pathTypeDirOfFiles
+				htmlEntry.Href = href
+				if link.Title != "" {
+					htmlEntry.Name = link.Title
+				}
+			case strings.Contains(link.Rel, "image"):
+				if htmlEntry.CoverURL == "" {
+					htmlEntry.CoverURL = href
+				}
+			case link.Rel == "http://opds-spec.org/acquisition":
+				htmlEntry.Type = pathTypeFile
+				htmlEntry.Href = href
+				if link.Title != "" {
+					htmlEntry.Name = link.Title
+				}
+			}
+		}
+		data.Entries = append(data.Entries, htmlEntry)
+	}
+
+	tmpl, err := template.New("catalog").Parse(htmlTemplate)
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	return tmpl.Execute(w, data)
+}
+
+func (s OPDS) htmlHref(href string) string {
+	if s.BaseURL == "" || !strings.HasPrefix(href, s.BaseURL) {
+		return href
+	}
+	trimmed := strings.TrimPrefix(href, strings.TrimSuffix(s.BaseURL, "/"))
+	if trimmed == "" {
+		return "/"
+	}
+	return trimmed
+}
+
+func pageFromURL(rawURL string) int {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return 0
+	}
+	page, err := strconv.Atoi(parsed.Query().Get("page"))
+	if err != nil {
+		return 0
+	}
+	return page
 }
 
 func formatSize(size int64) string {

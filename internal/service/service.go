@@ -10,6 +10,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dubyte/dir2opds/opds"
@@ -61,8 +63,10 @@ const (
 )
 
 const (
-	defaultPageSize = 50
-	maxPageSize     = 200
+	defaultPageSize  = 50
+	maxPageSize      = 200
+	bookIndexVersion = 2
+	staticXMLVersion = 2
 )
 
 const (
@@ -81,6 +85,8 @@ var supportedBookExtensions = map[string]bool{
 	".pdf":  true,
 }
 
+var diskBookIndexMu sync.Mutex
+
 type OPDS struct {
 	TrustedRoot      string
 	ThumbDir         string
@@ -97,6 +103,28 @@ type OPDS struct {
 	BaseURL          string
 	PageSize         int
 	NoPagination     bool
+}
+
+type bookIndexFingerprint struct {
+	Count         int
+	LatestModTime time.Time
+}
+
+type diskBookIndexMeta struct {
+	RootPath         string `json:"root_path"`
+	TrustedRoot      string `json:"trusted_root"`
+	HideCalibreFiles bool   `json:"hide_calibre_files"`
+	HideDotFiles     bool   `json:"hide_dot_files"`
+	Version          int    `json:"version"`
+	Count            int    `json:"count"`
+	LatestModTime    int64  `json:"latest_mod_time"`
+}
+
+type diskBookRecord struct {
+	Name    string `json:"name"`
+	Href    string `json:"href"`
+	ModTime int64  `json:"mod_time"`
+	Size    int64  `json:"size"`
 }
 
 type Catalog struct {
@@ -224,23 +252,6 @@ func (s OPDS) Scan(fPath string, urlPath string, page int) (*Catalog, error) {
 			catalog.ModTime = info.ModTime()
 		}
 
-		if s.ExtractMetadata && !entry.IsDir() {
-			idx := len(catalog.Entries) - 1
-			title, author, coverPath := extractMetadata(entryPath)
-			if title != "" {
-				catalog.Entries[idx].Title = title
-			}
-			if author != "" {
-				catalog.Entries[idx].Author = author
-			}
-			if coverPath != "" {
-				catalog.Entries[idx].CoverPath = coverPath
-			}
-
-			if cachedCover, err := ensureCachedCover(s.thumbDir(), entryPath); err == nil && cachedCover != "" {
-				catalog.Entries[idx].CoverPath = cachedCover
-			}
-		}
 	}
 
 	s.sortEntries(catalog.Entries)
@@ -272,8 +283,331 @@ func (s OPDS) Scan(fPath string, urlPath string, page int) (*Catalog, error) {
 	catalog.Page = page
 	catalog.PageSize = pageSize
 	catalog.Entries = catalog.Entries[start:end]
+	s.enrichVisibleEntries(catalog, fPath, urlPath)
 
 	return catalog, nil
+}
+
+func (s OPDS) enrichVisibleEntries(catalog *Catalog, rootPath, urlPath string) {
+	if !s.ExtractMetadata {
+		return
+	}
+
+	for idx := range catalog.Entries {
+		if catalog.Entries[idx].Type != pathTypeFile {
+			continue
+		}
+
+		entryPath := filepath.Join(rootPath, catalog.Entries[idx].Name)
+		if catalog.Entries[idx].Href != "" {
+			if hrefPath, err := url.PathUnescape(strings.TrimPrefix(catalog.Entries[idx].Href, "/")); err == nil {
+				entryPath = filepath.Join(s.TrustedRoot, filepath.FromSlash(hrefPath))
+			}
+		} else if urlPath != "" {
+			entryPath = filepath.Join(s.TrustedRoot, filepath.FromSlash(strings.TrimPrefix(path.Join(urlPath, catalog.Entries[idx].Name), "/")))
+		}
+
+		title, author, coverPath := extractMetadata(entryPath)
+		if title != "" {
+			catalog.Entries[idx].Title = title
+		}
+		if author != "" {
+			catalog.Entries[idx].Author = author
+		}
+		if coverPath != "" {
+			catalog.Entries[idx].CoverPath = coverPath
+		}
+
+		if cachedCover, err := ensureCachedCover(s.thumbDir(), entryPath); err == nil && cachedCover != "" {
+			catalog.Entries[idx].CoverPath = cachedCover
+		}
+	}
+}
+
+func (s OPDS) WarmBookIndex() {
+	go func() {
+		start := time.Now()
+		meta, err := s.ensureDiskBookIndex(s.TrustedRoot)
+		if err != nil {
+			slog.Error("book index warmup failed", "error", err)
+			return
+		}
+		slog.Info("book index warmed", "entries", meta.Count, "duration", time.Since(start).String())
+	}()
+}
+
+func (s OPDS) scanBookFingerprint(rootPath string) (bookIndexFingerprint, error) {
+	var fingerprint bookIndexFingerprint
+	err := filepath.WalkDir(rootPath, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if fileShouldBeIgnored(entry.Name(), s.HideCalibreFiles, s.HideDotFiles) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() || !isSupportedBookFile(entry.Name()) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			slog.Debug("error getting info for indexed entry", "path", path, "error", err)
+			return nil
+		}
+		fingerprint.Count++
+		if fingerprint.LatestModTime.IsZero() || info.ModTime().After(fingerprint.LatestModTime) {
+			fingerprint.LatestModTime = info.ModTime()
+		}
+		return nil
+	})
+	if err != nil {
+		return bookIndexFingerprint{}, err
+	}
+	return fingerprint, nil
+}
+
+func (s OPDS) scanBookEntries(rootPath string) ([]CatalogEntry, bookIndexFingerprint, error) {
+	var entries []CatalogEntry
+	var fingerprint bookIndexFingerprint
+
+	err := filepath.WalkDir(rootPath, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if fileShouldBeIgnored(entry.Name(), s.HideCalibreFiles, s.HideDotFiles) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() || !isSupportedBookFile(entry.Name()) {
+			return nil
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			slog.Debug("error getting info for indexed entry", "path", path, "error", err)
+			return nil
+		}
+
+		relPath, err := filepath.Rel(s.TrustedRoot, path)
+		if err != nil {
+			return err
+		}
+
+		fingerprint.Count++
+		if fingerprint.LatestModTime.IsZero() || info.ModTime().After(fingerprint.LatestModTime) {
+			fingerprint.LatestModTime = info.ModTime()
+		}
+
+		entries = append(entries, CatalogEntry{
+			Name:    info.Name(),
+			Type:    pathTypeFile,
+			Href:    "/" + filepath.ToSlash(relPath),
+			ModTime: info.ModTime(),
+			Size:    info.Size(),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, bookIndexFingerprint{}, err
+	}
+
+	return entries, fingerprint, nil
+}
+
+func (s OPDS) diskBookIndexBase() string {
+	return filepath.Join(s.thumbDir(), "book-index")
+}
+
+func (s OPDS) diskBookIndexMetaPath() string {
+	return s.diskBookIndexBase() + ".meta.json"
+}
+
+func (s OPDS) diskBookIndexPath(sortBy string) string {
+	switch sortBy {
+	case "date":
+		return s.diskBookIndexBase() + ".date.jsonl"
+	default:
+		return s.diskBookIndexBase() + ".name.jsonl"
+	}
+}
+
+func (s OPDS) expectedDiskBookIndexMeta(rootPath string, fingerprint bookIndexFingerprint) diskBookIndexMeta {
+	return diskBookIndexMeta{
+		RootPath:         rootPath,
+		TrustedRoot:      s.TrustedRoot,
+		HideCalibreFiles: s.HideCalibreFiles,
+		HideDotFiles:     s.HideDotFiles,
+		Version:          bookIndexVersion,
+		Count:            fingerprint.Count,
+		LatestModTime:    fingerprint.LatestModTime.UnixNano(),
+	}
+}
+
+func (m diskBookIndexMeta) matches(other diskBookIndexMeta) bool {
+	return m.RootPath == other.RootPath &&
+		m.TrustedRoot == other.TrustedRoot &&
+		m.HideCalibreFiles == other.HideCalibreFiles &&
+		m.HideDotFiles == other.HideDotFiles &&
+		m.Version == other.Version &&
+		m.Count == other.Count &&
+		m.LatestModTime == other.LatestModTime
+}
+
+func (s OPDS) readDiskBookIndexMeta() (diskBookIndexMeta, error) {
+	data, err := os.ReadFile(s.diskBookIndexMetaPath())
+	if err != nil {
+		return diskBookIndexMeta{}, err
+	}
+	var meta diskBookIndexMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return diskBookIndexMeta{}, err
+	}
+	return meta, nil
+}
+
+func (s OPDS) ensureDiskBookIndex(rootPath string) (diskBookIndexMeta, error) {
+	diskBookIndexMu.Lock()
+	defer diskBookIndexMu.Unlock()
+
+	fingerprint, err := s.scanBookFingerprint(rootPath)
+	if err != nil {
+		return diskBookIndexMeta{}, err
+	}
+	expected := s.expectedDiskBookIndexMeta(rootPath, fingerprint)
+
+	if existing, err := s.readDiskBookIndexMeta(); err == nil && existing.matches(expected) {
+		if _, err := os.Stat(s.diskBookIndexPath("name")); err == nil {
+			if _, err := os.Stat(s.diskBookIndexPath("date")); err == nil {
+				return existing, nil
+			}
+		}
+	}
+
+	start := time.Now()
+	entries, fingerprint, err := s.scanBookEntries(rootPath)
+	if err != nil {
+		return diskBookIndexMeta{}, err
+	}
+	meta := s.expectedDiskBookIndexMeta(rootPath, fingerprint)
+	if err := s.writeDiskBookIndexes(entries, meta); err != nil {
+		return diskBookIndexMeta{}, err
+	}
+	slog.Info("disk book index refreshed", "root", rootPath, "entries", meta.Count, "duration", time.Since(start).String())
+	return meta, nil
+}
+
+func (s OPDS) writeDiskBookIndexes(entries []CatalogEntry, meta diskBookIndexMeta) error {
+	byName := make([]CatalogEntry, len(entries))
+	copy(byName, entries)
+	sort.Slice(byName, func(i, j int) bool {
+		return byName[i].Name < byName[j].Name
+	})
+	if err := s.writeDiskBookIndexFile(s.diskBookIndexPath("name"), byName); err != nil {
+		return err
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].ModTime.After(entries[j].ModTime)
+	})
+	if err := s.writeDiskBookIndexFile(s.diskBookIndexPath("date"), entries); err != nil {
+		return err
+	}
+
+	metaData, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(s.diskBookIndexMetaPath(), metaData, 0o644); err != nil {
+		return err
+	}
+	s.clearStaticXMLCache()
+	return nil
+}
+
+func (s OPDS) writeDiskBookIndexFile(indexPath string, entries []CatalogEntry) error {
+	tmpPath := indexPath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+
+	enc := json.NewEncoder(f)
+	for _, entry := range entries {
+		record := diskBookRecord{
+			Name:    entry.Name,
+			Href:    entry.Href,
+			ModTime: entry.ModTime.UnixNano(),
+			Size:    entry.Size,
+		}
+		if err := enc.Encode(record); err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, indexPath)
+}
+
+func diskBookRecordToCatalogEntry(record diskBookRecord) CatalogEntry {
+	return CatalogEntry{
+		Name:    record.Name,
+		Type:    pathTypeFile,
+		Href:    record.Href,
+		ModTime: time.Unix(0, record.ModTime),
+		Size:    record.Size,
+	}
+}
+
+func (s OPDS) readDiskBookIndexPage(rootPath, sortBy string, page, pageSize int, query string) ([]CatalogEntry, int, time.Time, error) {
+	meta, err := s.ensureDiskBookIndex(rootPath)
+	if err != nil {
+		return nil, 0, time.Time{}, err
+	}
+
+	f, err := os.Open(s.diskBookIndexPath(sortBy))
+	if err != nil {
+		return nil, 0, time.Time{}, err
+	}
+	defer f.Close()
+
+	if page < 1 {
+		page = 1
+	}
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	queryLower := strings.ToLower(query)
+
+	var entries []CatalogEntry
+	total := 0
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var record diskBookRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			return nil, 0, time.Time{}, err
+		}
+		if queryLower != "" && !strings.Contains(strings.ToLower(record.Name), queryLower) {
+			continue
+		}
+		if total >= start && total < end {
+			entries = append(entries, diskBookRecordToCatalogEntry(record))
+		}
+		total++
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, 0, time.Time{}, err
+	}
+
+	if query == "" {
+		total = meta.Count
+	}
+	return entries, total, time.Unix(0, meta.LatestModTime), nil
 }
 
 func extractMetadata(path string) (string, string, string) {
@@ -637,7 +971,7 @@ func (s OPDS) sortEntries(entries []CatalogEntry) {
 	switch s.SortBy {
 	case "date":
 		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].ModTime.Before(entries[j].ModTime)
+			return entries[i].ModTime.After(entries[j].ModTime)
 		})
 	case "size":
 		sort.Slice(entries, func(i, j int) bool {
@@ -653,6 +987,130 @@ func (s OPDS) sortEntries(entries []CatalogEntry) {
 func isBrowser(r *http.Request) bool {
 	accept := r.Header.Get("Accept")
 	return strings.Contains(accept, "text/html")
+}
+
+func (s OPDS) staticXMLCacheDir() string {
+	dir := filepath.Join(s.thumbDir(), "static-xml")
+	_ = os.MkdirAll(dir, 0o755)
+	return dir
+}
+
+func (s OPDS) staticXMLCachePath(req *http.Request) string {
+	sum := sha256.Sum256([]byte(strconv.Itoa(staticXMLVersion) + "|" + s.BaseURL + "|" + req.URL.RequestURI()))
+	return filepath.Join(s.staticXMLCacheDir(), hex.EncodeToString(sum[:])+".xml")
+}
+
+func staticXMLCacheTypePath(xmlPath string) string {
+	return xmlPath + ".type"
+}
+
+func (s OPDS) serveStaticXMLCache(w http.ResponseWriter, req *http.Request) bool {
+	if s.EnableCache {
+		return false
+	}
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		return false
+	}
+	if s.EnableHTML && isBrowser(req) {
+		return false
+	}
+
+	content, contentType, ok := s.readStaticXMLCache(req)
+	if !ok {
+		return false
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	http.ServeContent(w, req, "feed.xml", TimeNow(), bytes.NewReader(content))
+	return true
+}
+
+func (s OPDS) renderStaticXMLCacheAsHTML(w http.ResponseWriter, req *http.Request) bool {
+	if s.EnableCache || !s.EnableHTML || !isBrowser(req) {
+		return false
+	}
+	content, _, ok := s.readStaticXMLCache(req)
+	if !ok {
+		return false
+	}
+	if err := s.renderHTMLFromXML(w, req, content); err != nil {
+		slog.Debug("render static xml as html failed", "uri", req.URL.RequestURI(), "error", err)
+		return false
+	}
+	return true
+}
+
+func (s OPDS) readStaticXMLCache(req *http.Request) ([]byte, string, bool) {
+	xmlPath := s.staticXMLCachePath(req)
+	content, err := os.ReadFile(xmlPath)
+	if err != nil {
+		return nil, "", false
+	}
+
+	contentType := "application/atom+xml"
+	if data, err := os.ReadFile(staticXMLCacheTypePath(xmlPath)); err == nil {
+		contentType = strings.TrimSpace(string(data))
+	}
+	return content, contentType, true
+}
+
+func (s OPDS) writeStaticXMLCache(req *http.Request, contentType string, content []byte) {
+	if s.EnableCache {
+		return
+	}
+	if req.Method != http.MethodGet {
+		return
+	}
+
+	xmlPath := s.staticXMLCachePath(req)
+	tmpPath := xmlPath + ".tmp"
+	if err := os.WriteFile(tmpPath, content, 0o644); err != nil {
+		slog.Debug("write static xml cache failed", "path", xmlPath, "error", err)
+		return
+	}
+	if err := os.Rename(tmpPath, xmlPath); err != nil {
+		slog.Debug("rename static xml cache failed", "path", xmlPath, "error", err)
+		return
+	}
+	if err := os.WriteFile(staticXMLCacheTypePath(xmlPath), []byte(contentType), 0o644); err != nil {
+		slog.Debug("write static xml cache content type failed", "path", xmlPath, "error", err)
+	}
+}
+
+func (s OPDS) writeCatalogStaticXMLCache(req *http.Request, catalog *Catalog) error {
+	contentType, content, err := s.catalogFeedContent(catalog, req)
+	if err != nil {
+		return err
+	}
+	s.writeStaticXMLCache(req, contentType, content)
+	return nil
+}
+
+func (s OPDS) writeSortSelectionStaticXMLCache(req *http.Request) error {
+	content, err := xml.MarshalIndent(s.makeSortSelectionFeed(req), "  ", "    ")
+	if err != nil {
+		return err
+	}
+	content = append([]byte(xml.Header), content...)
+	s.writeStaticXMLCache(req, navigationType, content)
+	return nil
+}
+
+func (s OPDS) clearStaticXMLCache() {
+	dir := s.staticXMLCacheDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, ".xml") || strings.HasSuffix(name, ".xml.type") || strings.HasSuffix(name, ".xml.tmp") {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
 }
 
 // Handler serves the content of a book file or
@@ -671,7 +1129,7 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 	// verifyPath avoid the http transversal by checking the path is under DirRoot
 	_, err = verifyPath(fPath, s.TrustedRoot)
 	if err != nil {
-		slog.Error("verify path error", "error", err)
+		slog.Debug("verify path rejected request", "path", req.URL.Path, "error", err)
 		w.WriteHeader(http.StatusNotFound)
 		return nil
 	}
@@ -695,10 +1153,17 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 		w.Header().Add("Expires", "0")
 	}
 
+	if s.renderStaticXMLCacheAsHTML(w, req) || s.serveStaticXMLCache(w, req) {
+		return nil
+	}
+
 	query := req.URL.Query()
 	if urlPath == "/" {
 		if query.Get("sort") == "" {
 			if s.EnableHTML && isBrowser(req) {
+				if err := s.writeSortSelectionStaticXMLCache(req); err != nil {
+					return err
+				}
 				return s.renderHTML(w, req, s.makeSortSelectionCatalog(req))
 			}
 			return s.serveSortSelectionFeed(w, req)
@@ -709,6 +1174,9 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 			return err
 		}
 		if s.EnableHTML && isBrowser(req) {
+			if err := s.writeCatalogStaticXMLCache(req, catalog); err != nil {
+				return err
+			}
 			return s.renderHTML(w, req, catalog)
 		}
 		return s.serveCatalogFeed(w, req, catalog)
@@ -738,6 +1206,9 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 
 	if pathType == pathTypeDirOfFiles && query.Get("sort") == "" {
 		if s.EnableHTML && isBrowser(req) {
+			if err := s.writeSortSelectionStaticXMLCache(req); err != nil {
+				return err
+			}
 			return s.renderHTML(w, req, s.makeSortSelectionCatalog(req))
 		}
 		return s.serveSortSelectionFeed(w, req)
@@ -768,6 +1239,9 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 	}
 
 	if s.EnableHTML && isBrowser(req) {
+		if err := s.writeCatalogStaticXMLCache(req, catalog); err != nil {
+			return err
+		}
 		return s.renderHTML(w, req, catalog)
 	}
 
@@ -775,27 +1249,38 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 }
 
 func (s OPDS) serveCatalogFeed(w http.ResponseWriter, req *http.Request, catalog *Catalog) error {
+	contentType, content, err := s.catalogFeedContent(catalog, req)
+	if err != nil {
+		return err
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	s.writeStaticXMLCache(req, contentType, content)
+	http.ServeContent(w, req, "feed.xml", TimeNow(), bytes.NewReader(content))
+
+	return nil
+}
+
+func (s OPDS) catalogFeedContent(catalog *Catalog, req *http.Request) (string, []byte, error) {
 	navFeed := s.makeFeed(catalog, req)
 	var content []byte
 	var err error
+	contentType := navigationType
 	// it is an acquisition feed
 	if catalog.Type == pathTypeDirOfFiles {
 		acFeed := &opds.AcquisitionFeed{Feed: &navFeed, Dc: dcTermsNamespace, Opds: opdsNamespace}
 		content, err = xml.MarshalIndent(acFeed, "  ", "    ")
-		w.Header().Add("Content-Type", acquisitionType)
+		contentType = acquisitionType
 	} else { // it is a navigation feed
 		content, err = xml.MarshalIndent(navFeed, "  ", "    ")
-		w.Header().Add("Content-Type", navigationType)
 	}
 	if err != nil {
 		slog.Error("error marshaling feed", "error", err)
-		return err
+		return "", nil, err
 	}
 
 	content = append([]byte(xml.Header), content...)
-	http.ServeContent(w, req, "feed.xml", TimeNow(), bytes.NewReader(content))
-
-	return nil
+	return contentType, content, nil
 }
 
 func (s OPDS) serveSortSelectionFeed(w http.ResponseWriter, req *http.Request) error {
@@ -804,8 +1289,9 @@ func (s OPDS) serveSortSelectionFeed(w http.ResponseWriter, req *http.Request) e
 		slog.Error("error marshaling sort selection feed", "error", err)
 		return err
 	}
-	w.Header().Add("Content-Type", navigationType)
+	w.Header().Set("Content-Type", navigationType)
 	content = append([]byte(xml.Header), content...)
+	s.writeStaticXMLCache(req, navigationType, content)
 	http.ServeContent(w, req, "feed.xml", TimeNow(), bytes.NewReader(content))
 	return nil
 }
@@ -900,83 +1386,16 @@ func (s OPDS) collectBookCatalog(rootPath, urlPath, title string, page int, sort
 		PageSize: s.pageSize(),
 	}
 
-	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if fileShouldBeIgnored(info.Name(), s.HideCalibreFiles, s.HideDotFiles) {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if info.IsDir() || !isSupportedBookFile(info.Name()) {
-			return nil
-		}
-		if query != "" && !strings.Contains(strings.ToLower(info.Name()), strings.ToLower(query)) {
-			return nil
-		}
-
-		relPath, err := filepath.Rel(s.TrustedRoot, path)
-		if err != nil {
-			return err
-		}
-		entry := CatalogEntry{
-			Name:    info.Name(),
-			Type:    pathTypeFile,
-			Href:    "/" + filepath.ToSlash(relPath),
-			ModTime: info.ModTime(),
-			Size:    info.Size(),
-		}
-
-		if catalog.ModTime.IsZero() || info.ModTime().After(catalog.ModTime) {
-			catalog.ModTime = info.ModTime()
-		}
-
-		if s.ExtractMetadata {
-			title, author, coverPath := extractMetadata(path)
-			if title != "" {
-				entry.Title = title
-			}
-			if author != "" {
-				entry.Author = author
-			}
-			if coverPath != "" {
-				entry.CoverPath = coverPath
-			}
-			if cachedCover, err := ensureCachedCover(s.thumbDir(), path); err == nil && cachedCover != "" {
-				entry.CoverPath = cachedCover
-			}
-		}
-
-		catalog.Entries = append(catalog.Entries, entry)
-		return nil
-	})
+	entries, total, modTime, err := s.readDiskBookIndexPage(rootPath, sortBy, page, catalog.PageSize, query)
 	if err != nil {
 		return nil, err
 	}
-
-	sortService := s
-	sortService.SortBy = sortBy
-	sortService.sortEntries(catalog.Entries)
-
-	total := len(catalog.Entries)
-	pageSize := catalog.PageSize
-	if page < 1 {
-		page = 1
-	}
-	start := (page - 1) * pageSize
-	end := start + pageSize
-	if start > total {
-		start = total
-	}
-	if end > total {
-		end = total
-	}
+	catalog.ModTime = modTime
 
 	catalog.Total = total
 	catalog.Page = page
-	catalog.Entries = catalog.Entries[start:end]
+	catalog.Entries = entries
+	s.enrichVisibleEntries(catalog, rootPath, urlPath)
 	return catalog, nil
 }
 
@@ -987,9 +1406,16 @@ func (s OPDS) SearchHandler(w http.ResponseWriter, req *http.Request) error {
 		return s.Handler(w, req)
 	}
 
+	if s.renderStaticXMLCacheAsHTML(w, req) || s.serveStaticXMLCache(w, req) {
+		return nil
+	}
+
 	sortBy := req.URL.Query().Get("sort")
 	if sortBy == "" {
 		if s.EnableHTML && isBrowser(req) {
+			if err := s.writeSortSelectionStaticXMLCache(req); err != nil {
+				return err
+			}
 			return s.renderHTML(w, req, s.makeSortSelectionCatalog(req))
 		}
 		return s.serveSortSelectionFeed(w, req)
@@ -1001,20 +1427,12 @@ func (s OPDS) SearchHandler(w http.ResponseWriter, req *http.Request) error {
 	}
 
 	if s.EnableHTML && isBrowser(req) {
+		if err := s.writeCatalogStaticXMLCache(req, catalog); err != nil {
+			return err
+		}
 		return s.renderHTML(w, req, catalog)
 	}
-
-	navFeed := s.makeFeed(catalog, req)
-	acFeed := &opds.AcquisitionFeed{Feed: &navFeed, Dc: dcTermsNamespace, Opds: opdsNamespace}
-	content, err := xml.MarshalIndent(acFeed, "  ", "    ")
-	if err != nil {
-		return err
-	}
-
-	w.Header().Add("Content-Type", acquisitionType)
-	content = append([]byte(xml.Header), content...)
-	http.ServeContent(w, req, "feed.xml", TimeNow(), bytes.NewReader(content))
-	return nil
+	return s.serveCatalogFeed(w, req, catalog)
 }
 
 // OpenSearchHandler serves the OpenSearch description document
@@ -1057,7 +1475,7 @@ func (s OPDS) CoverHandler(w http.ResponseWriter, req *http.Request) error {
 	// verifyPath avoid the http transversal by checking the path is under TrustedRoot
 	_, err = verifyPath(fPath, s.TrustedRoot)
 	if err != nil {
-		slog.Error("verify path error for cover", "error", err)
+		slog.Debug("verify path rejected cover request", "file", filePath, "error", err)
 		w.WriteHeader(http.StatusNotFound)
 		return nil
 	}
@@ -1206,7 +1624,29 @@ func extractFirstImageFromPDF(pdfPath string) ([]byte, string, error) {
 		return image, ".png", nil
 	}
 
-	return nil, "", nil
+	return generatedPDFCover(pdfPath), ".svg", nil
+}
+
+func generatedPDFCover(pdfPath string) []byte {
+	title := filepath.Base(pdfPath)
+	if len([]rune(title)) > 48 {
+		runes := []rune(title)
+		title = string(runes[:48]) + "..."
+	}
+
+	var escaped bytes.Buffer
+	_ = xml.EscapeText(&escaped, []byte(title))
+
+	return []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="640" viewBox="0 0 480 640">
+  <rect width="480" height="640" fill="#f7f3ea"/>
+  <rect x="42" y="42" width="396" height="556" rx="18" fill="#ffffff" stroke="#d8d1c4" stroke-width="4"/>
+  <rect x="82" y="112" width="316" height="12" fill="#c8c1b6"/>
+  <rect x="82" y="150" width="250" height="12" fill="#ded8cf"/>
+  <rect x="82" y="188" width="290" height="12" fill="#ded8cf"/>
+  <text x="240" y="332" text-anchor="middle" font-family="Arial, sans-serif" font-size="58" font-weight="700" fill="#b23a2f">PDF</text>
+  <text x="240" y="404" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" fill="#3b4652">` + escaped.String() + `</text>
+</svg>`)
 }
 
 func extractJPEGBytes(data []byte) ([]byte, bool) {
@@ -1505,7 +1945,6 @@ func verifyPath(path, trustedRoot string) (string, error) {
 	// get the canonical path
 	r, err := filepath.EvalSymlinks(c)
 	if err != nil {
-		slog.Error("verifyPath error", "error", err)
 		return c, errors.New("unsafe or invalid path specified")
 	}
 

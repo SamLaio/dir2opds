@@ -91,7 +91,7 @@ func TestSortEntries(t *testing.T) {
 
 	s.SortBy = "date"
 	s.sortEntries(entries)
-	assert.Equal(t, "C", entries[0].Name) // Oldest first
+	assert.Equal(t, "A", entries[0].Name) // Newest first
 }
 
 func TestExtractMetadata(t *testing.T) {
@@ -323,16 +323,29 @@ func TestFindEpubCoverFromPropertiesCoverImage(t *testing.T) {
 }
 
 func TestExtractFirstImageFromPDF(t *testing.T) {
-	pdfPath := filepath.Join(t.TempDir(), "cover.pdf")
-	jpeg := []byte{0xff, 0xd8, 0xff, 0xe0, 'j', 'p', 'e', 'g', 0xff, 0xd9}
-	content := append([]byte("%PDF-1.4\nstream\n"), jpeg...)
-	content = append(content, []byte("\nendstream\n%%EOF")...)
-	require.NoError(t, os.WriteFile(pdfPath, content, 0o644))
+	t.Run("embedded JPEG", func(t *testing.T) {
+		pdfPath := filepath.Join(t.TempDir(), "cover.pdf")
+		jpeg := []byte{0xff, 0xd8, 0xff, 0xe0, 'j', 'p', 'e', 'g', 0xff, 0xd9}
+		content := append([]byte("%PDF-1.4\nstream\n"), jpeg...)
+		content = append(content, []byte("\nendstream\n%%EOF")...)
+		require.NoError(t, os.WriteFile(pdfPath, content, 0o644))
 
-	image, ext, err := extractFirstImageFromPDF(pdfPath)
-	require.NoError(t, err)
-	assert.Equal(t, ".jpg", ext)
-	assert.Equal(t, jpeg, image)
+		image, ext, err := extractFirstImageFromPDF(pdfPath)
+		require.NoError(t, err)
+		assert.Equal(t, ".jpg", ext)
+		assert.Equal(t, jpeg, image)
+	})
+
+	t.Run("fallback SVG", func(t *testing.T) {
+		pdfPath := filepath.Join(t.TempDir(), "plain.pdf")
+		require.NoError(t, os.WriteFile(pdfPath, []byte("%PDF-1.4\n%%EOF"), 0o644))
+
+		image, ext, err := extractFirstImageFromPDF(pdfPath)
+		require.NoError(t, err)
+		assert.Equal(t, ".svg", ext)
+		assert.Contains(t, string(image), "<svg")
+		assert.Contains(t, string(image), "plain.pdf")
+	})
 }
 
 func createTestEPUB(t *testing.T, path string, files map[string]string) {
