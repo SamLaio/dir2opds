@@ -1,0 +1,9 @@
+.git
+.github
+.agents
+.codex
+books
+dist
+tmp
+*.log
+docker-compose.yml

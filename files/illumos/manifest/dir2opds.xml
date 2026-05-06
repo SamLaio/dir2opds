@@ -88,7 +88,7 @@
 
 	<template>
 		<common_name>
-			<loctext xml:lang='C'>dir2opds OPDS 1.1 compliant server</loctext>
+			<loctext xml:lang='C'>dir2opds OPDS 1.2 compliant server</loctext>
 		</common_name>
 	</template>
 

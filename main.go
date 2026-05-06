@@ -23,10 +23,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
 
-	"github.com/dubyte/dir2opds/internal/service"
+	"github.com/dubyte/dir2opds/internal/server"
 )
 
 var (
@@ -39,7 +37,7 @@ var (
 	noCache      = flag.Bool("no-cache", false, "adds reponse headers to avoid client from caching.")
 	enableCache  = flag.Bool("enable-cache", false, "Enable ETag and Last-Modified headers for conditional requests.")
 	gzip         = flag.Bool("gzip", false, "Enable gzip compression for responses.")
-	sortBy       = flag.String("sort", "name", "Sort entries by: name, date, size.")
+	sortBy       = flag.String("sort", "date", "Sort entries by: name, date, size.")
 	showCovers   = flag.Bool("show-covers", false, "Show cover.jpg or folder.jpg as catalog cover.")
 	mimeMapStr   = flag.String("mime-map", "", "Custom mime types (e.g., '.mobi:application/x-mobipocket-ebook,.azw3:application/vnd.amazon.ebook')")
 	searchEnable = flag.Bool("search", false, "Enable basic filename search.")
@@ -55,25 +53,7 @@ func main() {
 
 	flag.Parse()
 
-	var level slog.Level
-	if *debug {
-		level = slog.LevelDebug
-	} else {
-		level = slog.LevelError
-	}
-
-	var handler slog.Handler
-	opts := &slog.HandlerOptions{Level: level}
-
-	switch strings.ToLower(*logFormat) {
-	case "text":
-		handler = slog.NewTextHandler(os.Stderr, opts)
-	default:
-		handler = slog.NewJSONHandler(os.Stderr, opts)
-	}
-
-	logger := slog.New(handler).With("base_url", *baseURL)
-	slog.SetDefault(logger)
+	server.ConfigureLogger(*debug, *logFormat, *baseURL)
 
 	// Use the absolute canonical path of the dir parm as the trustedRoot.
 	// Helps avoid http path traversal. https://github.com/dubyte/dir2opds/issues/17
@@ -87,12 +67,15 @@ func main() {
 
 	fmt.Println(startValues())
 
-	s := service.OPDS{
-		TrustedRoot:      absolutePath,
+	cfg := server.Config{
+		Host:             *host,
+		Port:             *port,
+		DirRoot:          absolutePath,
 		HideCalibreFiles: *calibre,
 		HideDotFiles:     *hideDotFiles,
 		NoCache:          *noCache,
 		EnableCache:      *enableCache,
+		EnableGzip:       *gzip,
 		SortBy:           *sortBy,
 		ShowCovers:       *showCovers,
 		MimeMap:          parseMimeMap(*mimeMapStr),
@@ -104,41 +87,20 @@ func main() {
 		NoPagination:     *noPagination,
 	}
 
-	http.HandleFunc("/", errorHandler(s.Handler))
-	http.HandleFunc("/health", service.HealthHandler)
-	if *searchEnable {
-		http.HandleFunc("/search", errorHandler(s.SearchHandler))
-		http.HandleFunc("/opensearch.xml", s.OpenSearchHandler)
-	}
-	if *extractMeta {
-		http.HandleFunc("/cover", errorHandler(s.CoverHandler))
+	srv, _, err := server.NewHTTPServer(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", err)
+		os.Exit(1)
 	}
 
-	var httpHandler http.Handler = http.DefaultServeMux
-	if *gzip {
-		slog.Info("gzip compression enabled")
-		httpHandler = service.GzipMiddleware(httpHandler)
-	}
-
-	if err := http.ListenAndServe(*host+":"+*port, httpHandler); err != nil {
-		slog.Error("server failed", "error", err)
+	if err := srv.ListenAndServe(); err != nil {
+		fmt.Fprintf(os.Stderr, "server failed: %s\n", err)
 		os.Exit(1)
 	}
 }
 
 func parseMimeMap(s string) map[string]string {
-	if s == "" {
-		return nil
-	}
-	m := make(map[string]string)
-	pairs := strings.Split(s, ",")
-	for _, pair := range pairs {
-		kv := strings.Split(pair, ":")
-		if len(kv) == 2 {
-			m[kv[0]] = kv[1]
-		}
-	}
-	return m
+	return server.ParseMimeMap(s)
 }
 
 func startValues() string {
@@ -158,17 +120,5 @@ func errorHandler(f func(http.ResponseWriter, *http.Request) error) http.Handler
 
 // absoluteCanonicalPath returns the canonical path of the absolute path that was passed
 func absoluteCanonicalPath(aPath string) (string, error) {
-	// get absolute path
-	aPath, err := filepath.Abs(aPath)
-	if err != nil {
-		return "", fmt.Errorf("get absolute path %s: %w", aPath, err)
-	}
-
-	// get canonical path
-	aPath, err = filepath.EvalSymlinks(aPath)
-	if err != nil {
-		return "", fmt.Errorf("get canonical path from absolute path %s: %w", aPath, err)
-	}
-
-	return aPath, nil
+	return server.AbsoluteCanonicalPath(aPath)
 }

@@ -1,0 +1,20 @@
+services:
+  dir2opds:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: dir2opds
+    ports:
+      - "8080:8080"
+    volumes:
+      # Put your books under ./books, or replace ./books with an absolute path.
+      - ./books:/books
+    command:
+      - -dir
+      - /books
+      - -port
+      - "8080"
+      - -enable-html
+      - -gzip
+      - -extract-metadata
+    restart: unless-stopped

@@ -1,5 +1,5 @@
 [Unit]
-Description=dir2opds OPDS 1.1 compliant server
+Description=dir2opds OPDS 1.2 compliant server
 Documentation=https://github.com/dubyte/dir2opds
 Requires=network-online.target
 

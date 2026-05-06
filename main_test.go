@@ -73,7 +73,7 @@ func Test_absoluteCanonicalPath(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "dir relative path", args: args{aPath: "./opds"}, want: filepath.Join(wd, "opds"), wantErr: false},
-		{name: "dir not exists", args: args{aPath: "books"}, want: "", wantErr: true},
+		{name: "dir not exists", args: args{aPath: "books-that-does-not-exist"}, want: "", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

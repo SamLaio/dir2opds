@@ -1,300 +1,183 @@
 # dir2opds
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/dubyte/dir2opds.svg)](https://pkg.go.dev/github.com/dubyte/dir2opds)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Releases](https://img.shields.io/github/v/release/dubyte/dir2opds?include_prereleases&label=release)](https://github.com/dubyte/dir2opds/releases)
+dir2opds 可以把本機的書籍資料夾轉成 OPDS 書庫，並提供簡單的瀏覽器 HTML 介面。它適合個人書庫使用，讓你可以用 OPDS app、手機、平板、電子書閱讀器或瀏覽器，在區網內瀏覽與下載書籍。
 
-**Serve an OPDS 1.1–compliant book catalog from a directory.** No database, no Calibre—just point dir2opds at a folder and use any OPDS client to browse and download your books.
+## 功能
 
----
+- 透過 HTTP 提供 OPDS 書庫。
+- 提供一般瀏覽器可看的 HTML 介面。
+- 提供 Windows GUI 啟動器。
+- 可用命令列或 Docker 執行。
+- 可依檔名搜尋書庫。
+- 只顯示支援的書籍格式：
+  - `.epub`
+  - `.cbz`
+  - `.zip`
+  - `.pdf`
+- 會盡可能產生封面縮圖。
+- 產生的封面縮圖會放在書籍資料夾底下：
 
-## Table of contents
+```text
+books/.thumb/
+```
 
-- [What is OPDS?](#what-is-opds)
-- [Features](#features)
-- [Quick start](#quick-start)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Caching](#caching)
-- [Pagination](#pagination)
-- [Compatible clients](#compatible-clients)
-- [Documentation](#documentation)
-- [Contributing](#contributing)
-- [License](#license)
-- [Acknowledgments](#acknowledgments)
+## 瀏覽方式
 
----
+打開書庫根目錄時，dir2opds 會先掃描 books 資料夾，然後只顯示兩個選項：
 
-## What is OPDS?
+- `By Name`
+- `By Date Added`
 
-[OPDS](http://opds-spec.org) (Open Publication Distribution System) is a standard for cataloging and distributing digital publications. OPDS clients (ebook readers, apps) can discover, browse, and download books from an OPDS server. dir2opds turns a plain directory tree into such a server.
+選擇其中一個後，才會顯示扁平化的書籍清單。真實資料夾路徑只會用在內部下載連結，不會顯示給使用者選擇。
 
-## Features
+搜尋也是同樣流程：
 
-- **OPDS 1.1 compliant** — Works with standard ebook readers and OPDS clients
-- **No database** — Reads directly from your filesystem; no Calibre or extra setup
-- **Flexible layout** — Organize by folders; optional metadata from EPUB/PDF
-- **Search** — Optional filename search (OpenSearch)
-- **Covers** — Optional `cover.jpg` / `folder.jpg` as catalog covers, or extract covers from EPUB files
-- **Web-friendly** — Optional HTML interface for browsing your collection via a web browser
-- **Pagination** — Configurable page size for large catalogs
-- **Caching** — ETag/Last-Modified for conditional requests, gzip compression
-- **Health endpoint** — `/health` endpoint for monitoring and load balancers
-- **Structured Logging** — Uses `log/slog` for JSON (default) or text logging
-- **Multiple formats** — EPUB, PDF, MOBI, AZW3, and more via configurable MIME types
-- **Lightweight** — Single binary; suitable for headless servers and containers
+1. 輸入搜尋字串。
+2. 選擇 `By Name` 或 `By Date Added`。
+3. 顯示符合條件的書籍。
 
-## Quick start
+## Windows GUI
 
-Using Docker (replace `v1.9.0` with the [latest release](https://github.com/dubyte/dir2opds/releases) if desired):
+如果不想使用命令列，可以直接使用 `dir2opds-gui.exe`。
+
+1. 開啟 `dir2opds-gui.exe`。
+2. 選擇 books 資料夾。
+3. port 可保留預設 `8080`，也可以自行修改。
+4. 按下 `Start`。
+5. 用瀏覽器開啟，或把 OPDS URL 加到閱讀器。
+
+GUI 會監聽所有網路介面，因此同一個區網內的其他裝置也可以連線。
+
+同一台 Windows 電腦可使用：
+
+```text
+http://127.0.0.1:8080/
+```
+
+手機、平板或電子書閱讀器請使用 Windows 電腦的區網 IP：
+
+```text
+http://192.168.x.x:8080/
+```
+
+如果其他裝置無法連線，請檢查 Windows 防火牆，允許所選 port 的 TCP inbound 連線。
+
+GUI 預設啟用：
+
+- HTML 介面
+- gzip
+- metadata 與封面擷取
+
+GUI 不啟用 HTTP conditional cache，這樣瀏覽器重新整理時比較不會沿用舊畫面。
+
+## 命令列使用方式
+
+直接啟動 server：
 
 ```bash
-docker run -d -p 8080:8080 -v ./books:/books --name dir2opds ghcr.io/dubyte/dir2opds:v1.9.0
+dir2opds -dir /path/to/books -port 8080 -enable-html -gzip -extract-metadata
 ```
 
-```
-
-Then open
-
-Then open `http://localhost:8080` in an OPDS client or browser.
-
-**Using Go:**
+若要讓區網內其他裝置連線：
 
 ```bash
-go install github.com/dubyte/dir2opds@latest
-dir2opds -dir /path/to/books -port 8080
+dir2opds -host 0.0.0.0 -dir /path/to/books -port 8080 -enable-html -gzip -extract-metadata
 ```
 
-**Tip:** For best client compatibility, use folders that contain either only subfolders (navigation) or only book files (acquisition), not mixed.
-
----
-
-## Installation
-
-### Go install
+若只允許本機連線：
 
 ```bash
-go install github.com/dubyte/dir2opds@latest
+dir2opds -host 127.0.0.1 -dir /path/to/books -port 8080 -enable-html -gzip -extract-metadata
 ```
 
-For other installation methods (Docker, Podman, pre-built binaries, etc.), see [INSTALLATION.md](INSTALLATION.md).
+## Docker 使用方式
 
----
-
-## Usage
-
-Default: serve `./books` on `http://0.0.0.0:8080`.
+複製 Docker Compose 範本：
 
 ```bash
-dir2opds -dir /path/to/books -port 8080
+cp docker-compose.example.yml docker-compose.yml
 ```
 
-### Options
+視需要修改 volume：
 
-| Flag | Description |
-|------|-------------|
-| `-calibre` | Hide files stored by Calibre |
-| `-debug` | Log requests |
-| `-dir` | Directory with books (default: `./books`) |
-| `-enable-cache` | Enable ETag/Last-Modified headers for conditional requests (bandwidth optimization) |
-| `-enable-html` | Enable web-friendly HTML view for browsers |
-| `-extract-metadata` | Extract title/author from EPUB and PDF, and covers from EPUB |
-| `-gzip` | Enable gzip compression for responses (reduces bandwidth) |
-| `-hide-dot-files` | Hide files whose names start with a dot |
-| `-host` | Listen address (default: `0.0.0.0`) |
-| `-log-format` | Log format: `json` (default), `text` |
-| `-mime-map` | Custom MIME types, e.g. `.mobi:application/x-mobipocket-ebook,.azw3:application/vnd.amazon.ebook` |
-| `-no-cache` | Add response headers to disable client caching |
-| `-no-pagination` | Disable pagination and show all entries in a single feed |
-| `-page-size` | Number of entries per page (default: `50`, max: `200`) |
-| `-port` | Listen port (default: `8080`) |
-| `-search` | Enable basic filename search |
-| `-search` | Enable basic filename search |
-| `-show-covers` | Use `cover.jpg` or `folder.jpg` as catalog covers |
-| `-sort` | Sort entries: `name`, `date`, or `size` (default: `name`) |
-| `-url` | The base URL used for absolute links in the feed (e.g., `https://opds.example.com`) |
+```yaml
+volumes:
+  - ./books:/books
+```
 
-### Recommended Configuration
-
-For the best experience, use these flags:
+啟動：
 
 ```bash
-dir2opds -dir /path/to/books -extract-metadata -enable-cache -gzip -enable-html
+docker compose up -d --build
 ```
 
-This enables:
-- **Metadata extraction** — Shows book titles and authors instead of filenames, plus cover thumbnails
-- **Caching** — Reduces bandwidth with ETag/Last-Modified headers
-- **Gzip compression** — Further reduces bandwidth for large catalogs
-- **Web-friendly UI** — Provides a modern HTML interface when browsing via a web browser
+開啟：
 
-For public servers, also set the base URL:
-
-```bash
-dir2opds -dir /path/to/books -extract-metadata -enable-cache -gzip -url https://opds.example.com
+```text
+http://localhost:8080/
 ```
 
----
+`docker-compose.yml` 已加入 git ignore，因此可以在裡面保留自己的本機路徑。
 
-## Caching
+## 支援格式
 
-dir2opds provides two caching-related options with different use cases:
+dir2opds 只會列出：
 
-### Default (no flags)
-
-Clients use their default caching behavior. No special headers are sent.
-
-### `-no-cache` — Disable Caching
-
-Forces clients to always fetch fresh data from the server. Useful for:
-- Frequently changing libraries (adding/removing books often)
-- Ensuring clients always see the latest catalog
-
-```bash
-dir2opds -dir /books -no-cache
+```text
+epub, cbz, zip, pdf
 ```
 
-This adds the following headers to every response:
-```
-Cache-Control: no-cache, no-store, must-revalidate
-Expires: 0
-```
+其他檔案可以留在資料夾中，但不會出現在書庫或搜尋結果裡。
 
-### `-enable-cache` — Enable Conditional Requests
+## 封面
 
-Enables bandwidth optimization through HTTP conditional requests. Useful for:
-- Large static libraries that rarely change
-- Reducing bandwidth when clients re-fetch the same catalog
-- Mobile clients on metered connections
+啟用 metadata 擷取後，dir2opds 會產生封面縮圖。
 
-```bash
-dir2opds -dir /books -enable-cache
-```
+封面處理方式：
 
-This adds the following headers to responses:
-```
-ETag: "<hash>"
-Last-Modified: <timestamp>
+- EPUB：讀取 OPF cover metadata、`cover-image` 屬性、cover XHTML 裡的圖片連結，最後 fallback 到第一張圖片。
+- CBZ/ZIP：使用壓縮檔裡的第一張圖片。
+- PDF：盡可能擷取第一張內嵌 JPEG 或 PNG 圖片。
+
+產生的縮圖會放在：
+
+```text
+<books folder>/.thumb/
 ```
 
-Clients can then send conditional requests:
-```
-If-None-Match: "<hash>"
-If-Modified-Since: <timestamp>
-```
+如果封面看起來是舊的，可以停止 server 後刪除 `.thumb`，下次會重新產生。
 
-If the catalog hasn't changed, the server responds with `304 Not Modified` (no body), saving bandwidth.
+## 常用參數
 
-### Combining Flags
+| 參數 | 用途 |
+| --- | --- |
+| `-dir` | 要提供服務的 books 資料夾。 |
+| `-host` | 監聽位址。區網使用請設為 `0.0.0.0`。 |
+| `-port` | HTTP port。 |
+| `-enable-html` | 啟用瀏覽器 HTML 介面。 |
+| `-gzip` | 壓縮回應內容。 |
+| `-extract-metadata` | 擷取 metadata 與封面。 |
+| `-search` | 啟用 OPDS/OpenSearch 搜尋端點。 |
+| `-enable-cache` | 啟用 ETag 與 Last-Modified。 |
+| `-no-cache` | 加上 no-cache headers。 |
+| `-page-size` | 每頁筆數，最大 200。 |
+| `-no-pagination` | 關閉分頁。 |
+| `-url` | OPDS 絕對連結用的 base URL。 |
+| `-log-format` | `json` 或 `text`。 |
+| `-debug` | 啟用 debug log。 |
 
-Using both `-no-cache` and `-enable-cache` is not recommended. `-no-cache` prevents clients from caching anything, so the 304 optimization from `-enable-cache` would never be used.
+## 健康檢查
 
----
-
-## Pagination
-
-For large libraries, dir2opds paginates catalog feeds to improve performance and reduce bandwidth.
-
-### How It Works
-
-- Feeds are split into pages with a configurable number of entries per page
-- Each page includes navigation links (`first`, `previous`, `next`, `last`)
-- Clients can request specific pages via the `?page=N` query parameter
-
-### Configuration
-
-```bash
-# Default: 50 entries per page
-dir2opds -dir /books
-
-# Custom page size: 100 entries per page
-dir2opds -dir /books -page-size 100
-
-# Maximum page size: 200 entries
-dir2opds -dir /books -page-size 200
-
-# Disable pagination: show all entries
-dir2opds -dir /books -no-pagination
+```text
+GET /health
 ```
 
-### Disabling Pagination
+回應：
 
-For small libraries or when using clients that work better with complete feeds, you can disable pagination entirely:
-
-```bash
-dir2opds -dir /books -no-pagination
+```json
+{"status":"ok"}
 ```
 
-When `-no-pagination` is set:
-- All entries are included in a single feed
-- No pagination navigation links are generated
-- The `?page=N` query parameter is ignored
-- Recommended for libraries with fewer than a few hundred books
+## 開發者文件
 
-### OPDS Feed Links
-
-When pagination is active, feeds include navigation links:
-
-```xml
-<feed>
-  <link rel="first" href="/?page=1" type="..."/>
-  <link rel="previous" href="/?page=1" type="..."/>
-  <link rel="next" href="/?page=3" type="..."/>
-  <link rel="last" href="/?page=10" type="..."/>
-  <!-- entries -->
-</feed>
-```
-
-### Client Usage
-
-Clients can navigate pages directly:
-
-```
-GET /                    # Page 1 (default)
-GET /?page=2             # Page 2
-GET /mybook?page=1       # Page 1 of /mybook
-```
-
----
-
-## Compatible clients
-
-These OPDS clients have been tested with dir2opds:
-
-| Client | Platform | Notes |
-|--------|----------|--------|
-| [Moon+ Reader](https://play.google.com/store/apps/details?id=com.flyersoft.moonreader) | Android | Tested |
-| [Cantook](https://apps.apple.com/us/app/cantook-by-aldiko/id1476410111) | iPhone | Tested |
-| [KYBook 3](https://apps.apple.com/us/app/kybook-3-ebook-reader/id1348198785) | iOS | Enable **Settings → Apps → KyBook 3 → Local Network**. Older app may not show the prompt; enable manually. |
-
----
-
-## Documentation
-
-- [Installation](INSTALLATION.md)
-- [Changelog](CHANGELOG.md)
-- [OPDS specification](http://opds-spec.org)
-- [Contributing](CONTRIBUTING.md)
-
----
-
-## Contributing
-
-Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for license agreements, development setup, and pull request process.
-
----
-
-## License
-
-This project is licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE) for the full text.
-
----
-
-## Acknowledgments
-
-- **@clach04** — Testing and reporting missing content type for comics.
-- **@masked-owl** — Reporting the HTTP path traversal security issue.
-- **@mufeedali** — Update to push image to ghcr.io.
-- **@kulak** — Add podman support.
-- **@thenktor** - init files and Makefile improvements.
-- **@rockavoldy** — For the docker command example.
+請見 [README.DEVELOPMENT.md](README.DEVELOPMENT.md)。

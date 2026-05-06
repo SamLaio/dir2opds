@@ -204,7 +204,7 @@ const htmlTemplate = `
                     <div class="entry-meta">
                         {{if .Author}}By {{.Author}} | {{end}}
                         {{if .Size}}{{.SizeDisplay}} | {{end}}
-                        Modified: {{.ModTimeDisplay}}
+                        {{if .ModTimeDisplay}}Modified: {{.ModTimeDisplay}}{{end}}
                     </div>
                 </div>
             </li>
@@ -289,17 +289,27 @@ func (s OPDS) renderHTML(w http.ResponseWriter, req *http.Request, catalog *Cata
 	// Entries
 	for _, entry := range catalog.Entries {
 		var entryPath string
-		if strings.HasPrefix(catalog.ID, "search:") {
+		if entry.Href != "" {
+			entryPath = entry.Href
+		} else if strings.HasPrefix(catalog.ID, "search:") {
 			entryPath = "/" + entry.Name
 		} else {
 			entryPath = path.Join(req.URL.Path, entry.Name)
 		}
 
-		href := (&url.URL{Path: entryPath}).String()
-		
+		href := entryPath
+		if entry.Href == "" {
+			href = (&url.URL{Path: entryPath}).String()
+		}
+
 		var coverURL string
 		if s.ExtractMetadata && entry.CoverPath != "" && entry.Type == pathTypeFile {
 			coverURL = "/cover?file=" + url.QueryEscape(entryPath)
+		}
+
+		var modTimeDisplay string
+		if !entry.ModTime.IsZero() {
+			modTimeDisplay = entry.ModTime.Format("2006-01-02")
 		}
 
 		data.Entries = append(data.Entries, HTMLEntry{
@@ -307,7 +317,7 @@ func (s OPDS) renderHTML(w http.ResponseWriter, req *http.Request, catalog *Cata
 			Href:           href,
 			CoverURL:       coverURL,
 			SizeDisplay:    formatSize(entry.Size),
-			ModTimeDisplay: entry.ModTime.Format("2006-01-02"),
+			ModTimeDisplay: modTimeDisplay,
 		})
 	}
 

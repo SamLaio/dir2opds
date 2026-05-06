@@ -36,4 +36,10 @@ dist/
 # macOS
 .DS_Store
 
-.opencode/
+.opencode/*
+
+books
+epub
+docker-compose.yml
+
+.history

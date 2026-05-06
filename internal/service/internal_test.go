@@ -2,6 +2,8 @@ package service
 
 import (
 	"archive/zip"
+	"encoding/xml"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -62,6 +64,15 @@ func TestFileShouldBeIgnored(t *testing.T) {
 	assert.False(t, fileShouldBeIgnored("..", true, true))
 }
 
+func TestIsSupportedBookFile(t *testing.T) {
+	assert.True(t, isSupportedBookFile("book.epub"))
+	assert.True(t, isSupportedBookFile("book.cbz"))
+	assert.True(t, isSupportedBookFile("book.zip"))
+	assert.True(t, isSupportedBookFile("book.pdf"))
+	assert.False(t, isSupportedBookFile("book.txt"))
+	assert.False(t, isSupportedBookFile("cover.jpg"))
+}
+
 func TestSortEntries(t *testing.T) {
 	now := time.Now()
 	entries := []CatalogEntry{
@@ -80,7 +91,7 @@ func TestSortEntries(t *testing.T) {
 
 	s.SortBy = "date"
 	s.sortEntries(entries)
-	assert.Equal(t, "A", entries[0].Name) // Most recent
+	assert.Equal(t, "C", entries[0].Name) // Oldest first
 }
 
 func TestExtractMetadata(t *testing.T) {
@@ -129,7 +140,7 @@ func TestPagination(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, catalog.Page)
 		assert.Equal(t, defaultPageSize, catalog.PageSize)
-		assert.Equal(t, 5, catalog.Total)
+		assert.Equal(t, 3, catalog.Total)
 	})
 
 	t.Run("Page with small page size", func(t *testing.T) {
@@ -138,7 +149,7 @@ func TestPagination(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, catalog.Page)
 		assert.Equal(t, 2, catalog.PageSize)
-		assert.Equal(t, 5, catalog.Total)
+		assert.Equal(t, 3, catalog.Total)
 		assert.Len(t, catalog.Entries, 2)
 	})
 
@@ -147,8 +158,8 @@ func TestPagination(t *testing.T) {
 		catalog, err := s.Scan("testdata/mybook", "/mybook", 2)
 		require.NoError(t, err)
 		assert.Equal(t, 2, catalog.Page)
-		assert.Equal(t, 5, catalog.Total)
-		assert.Len(t, catalog.Entries, 2)
+		assert.Equal(t, 3, catalog.Total)
+		assert.Len(t, catalog.Entries, 1)
 	})
 
 	t.Run("Last page with partial entries", func(t *testing.T) {
@@ -156,8 +167,8 @@ func TestPagination(t *testing.T) {
 		catalog, err := s.Scan("testdata/mybook", "/mybook", 3)
 		require.NoError(t, err)
 		assert.Equal(t, 3, catalog.Page)
-		assert.Equal(t, 5, catalog.Total)
-		assert.Len(t, catalog.Entries, 1)
+		assert.Equal(t, 3, catalog.Total)
+		assert.Empty(t, catalog.Entries)
 	})
 
 	t.Run("Page beyond total", func(t *testing.T) {
@@ -264,7 +275,101 @@ func TestFindEpubCover(t *testing.T) {
 		}
 		require.NotEmpty(t, opfPath, "should find OPF file")
 
-		coverPath := findEpubCover(r, nil, opfPath)
+		coverPath := findEpubCover(r, nil, nil, opfPath)
 		t.Logf("Found cover path: %q", coverPath)
 	})
+}
+
+func TestFindEpubCoverFromMetaCoverXHTML(t *testing.T) {
+	epubPath := filepath.Join(t.TempDir(), "book.epub")
+	createTestEPUB(t, epubPath, map[string]string{
+		"OPS/content.opf": `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf">
+  <metadata><meta name="cover" content="frontcover"></meta></metadata>
+  <manifest>
+    <item id="frontcover" media-type="application/xhtml+xml" href="frontcover.xhtml"/>
+  </manifest>
+</package>`,
+		"OPS/frontcover.xhtml":      `<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><img src="images/frontcover.jpg"/></body></html>`,
+		"OPS/images/frontcover.jpg": "cover",
+	})
+
+	r, err := zip.OpenReader(epubPath)
+	require.NoError(t, err)
+	defer r.Close()
+
+	items, metas := readTestOPF(t, &r.Reader, "OPS/content.opf")
+	assert.Equal(t, "OPS/images/frontcover.jpg", findEpubCover(r, items, metas, "OPS/content.opf"))
+}
+
+func TestFindEpubCoverFromPropertiesCoverImage(t *testing.T) {
+	epubPath := filepath.Join(t.TempDir(), "book.epub")
+	createTestEPUB(t, epubPath, map[string]string{
+		"OPS/content.opf": `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf">
+  <manifest>
+    <item id="image1" media-type="image/png" href="images/cover.png" properties="cover-image"/>
+  </manifest>
+</package>`,
+		"OPS/images/cover.png": "cover",
+	})
+
+	r, err := zip.OpenReader(epubPath)
+	require.NoError(t, err)
+	defer r.Close()
+
+	items, metas := readTestOPF(t, &r.Reader, "OPS/content.opf")
+	assert.Equal(t, "OPS/images/cover.png", findEpubCover(r, items, metas, "OPS/content.opf"))
+}
+
+func TestExtractFirstImageFromPDF(t *testing.T) {
+	pdfPath := filepath.Join(t.TempDir(), "cover.pdf")
+	jpeg := []byte{0xff, 0xd8, 0xff, 0xe0, 'j', 'p', 'e', 'g', 0xff, 0xd9}
+	content := append([]byte("%PDF-1.4\nstream\n"), jpeg...)
+	content = append(content, []byte("\nendstream\n%%EOF")...)
+	require.NoError(t, os.WriteFile(pdfPath, content, 0o644))
+
+	image, ext, err := extractFirstImageFromPDF(pdfPath)
+	require.NoError(t, err)
+	assert.Equal(t, ".jpg", ext)
+	assert.Equal(t, jpeg, image)
+}
+
+func createTestEPUB(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+
+	w, err := os.Create(path)
+	require.NoError(t, err)
+	defer w.Close()
+
+	zw := zip.NewWriter(w)
+	for name, content := range files {
+		f, err := zw.Create(name)
+		require.NoError(t, err)
+		_, err = f.Write([]byte(content))
+		require.NoError(t, err)
+	}
+	require.NoError(t, zw.Close())
+}
+
+func readTestOPF(t *testing.T, r *zip.Reader, opfPath string) ([]epubManifestItem, []epubMeta) {
+	t.Helper()
+
+	f, err := r.Open(opfPath)
+	require.NoError(t, err)
+	defer f.Close()
+
+	content, err := io.ReadAll(f)
+	require.NoError(t, err)
+
+	var opf struct {
+		Manifest struct {
+			Items []epubManifestItem `xml:"item"`
+		} `xml:"manifest"`
+		Metadata struct {
+			Meta []epubMeta `xml:"meta"`
+		} `xml:"metadata"`
+	}
+	require.NoError(t, xml.NewDecoder(strings.NewReader(string(content))).Decode(&opf))
+	return opf.Manifest.Items, opf.Metadata.Meta
 }

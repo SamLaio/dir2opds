@@ -26,11 +26,11 @@ func TestHandler(t *testing.T) {
 		WantedContentType string
 		wantedStatusCode  int
 	}{
-		"feed (dir of dirs )":                 {input: "/", want: feed, WantedContentType: "application/atom+xml;profile=opds-catalog;kind=navigation", wantedStatusCode: 200},
-		"acquisitionFeed(dir of files)":       {input: "/mybook", want: acquisitionFeed, WantedContentType: "application/atom+xml;profile=opds-catalog;kind=acquisition", wantedStatusCode: 200},
+		"feed (dir of dirs )":                 {input: "/", want: rootSortSelectionFeed, WantedContentType: "application/atom+xml;profile=opds-catalog;kind=navigation", wantedStatusCode: 200},
+		"acquisitionFeed(dir of files)":       {input: "/mybook?sort=name", want: acquisitionFeed, WantedContentType: "application/atom+xml;profile=opds-catalog;kind=acquisition", wantedStatusCode: 200},
 		"servingAFile":                        {input: "/mybook/mybook.txt", want: "Fixture", WantedContentType: "text/plain; charset=utf-8", wantedStatusCode: 200},
 		"serving file with spaces":            {input: "/mybook/mybook%20copy.txt", want: "Fixture", WantedContentType: "text/plain; charset=utf-8", wantedStatusCode: 200},
-		"http trasversal vulnerability check": {input: "/../../../../mybook", want: feed, WantedContentType: "application/atom+xml;profile=opds-catalog;kind=navigation", wantedStatusCode: 404},
+		"http trasversal vulnerability check": {input: "/../../../../mybook", want: rootSortSelectionFeed, WantedContentType: "application/atom+xml;profile=opds-catalog;kind=navigation", wantedStatusCode: 404},
 		"browser request (HTML)":              {input: "/", want: "dir2opds", WantedContentType: "text/html; charset=utf-8", wantedStatusCode: 200},
 	}
 
@@ -78,6 +78,85 @@ func TestHandler(t *testing.T) {
 
 }
 
+func TestSortSelectionFeed(t *testing.T) {
+	s := service.OPDS{
+		TrustedRoot:      "testdata",
+		HideCalibreFiles: true,
+		HideDotFiles:     true,
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/mybook", nil)
+
+	err := s.Handler(w, req)
+	require.NoError(t, err)
+
+	resp := w.Result()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/atom+xml;profile=opds-catalog;kind=navigation", resp.Header.Get("Content-Type"))
+	assert.Contains(t, string(body), `title="By Name"`)
+	assert.Contains(t, string(body), `href="/mybook?sort=name"`)
+	assert.Contains(t, string(body), `title="By Date Added"`)
+	assert.Contains(t, string(body), `href="/mybook?sort=date"`)
+}
+
+func TestSortSelectionHTML(t *testing.T) {
+	s := service.OPDS{
+		TrustedRoot:      "testdata",
+		HideCalibreFiles: true,
+		HideDotFiles:     true,
+		EnableHTML:       true,
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/mybook", nil)
+	req.Header.Set("Accept", "text/html")
+
+	err := s.Handler(w, req)
+	require.NoError(t, err)
+
+	resp := w.Result()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "text/html; charset=utf-8", resp.Header.Get("Content-Type"))
+	assert.Contains(t, string(body), "By Name")
+	assert.Contains(t, string(body), "By Date Added")
+	assert.Contains(t, string(body), `href="/mybook?sort=name"`)
+	assert.Contains(t, string(body), `href="/mybook?sort=date"`)
+	assert.NotContains(t, string(body), "mybook.epub")
+}
+
+func TestSortSelectionHTMLBypassesConditionalCache(t *testing.T) {
+	s := service.OPDS{
+		TrustedRoot:      "testdata",
+		HideCalibreFiles: true,
+		HideDotFiles:     true,
+		EnableCache:      true,
+		EnableHTML:       true,
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/mybook", nil)
+	req.Header.Set("Accept", "text/html")
+	req.Header.Set("If-None-Match", `"cached-old-list"`)
+
+	err := s.Handler(w, req)
+	require.NoError(t, err)
+
+	resp := w.Result()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "By Name")
+	assert.Contains(t, string(body), "By Date Added")
+}
+
 func TestScan(t *testing.T) {
 	s := service.OPDS{TrustedRoot: "testdata", HideCalibreFiles: true, HideDotFiles: true}
 
@@ -93,10 +172,11 @@ func TestScan(t *testing.T) {
 		catalog, err := s.Scan("testdata/mybook", "/mybook", 1)
 		require.NoError(t, err)
 		assert.Equal(t, "/mybook", catalog.ID)
-		// mybook has 6 files but mybook.opf should be ignored
-		assert.Len(t, catalog.Entries, 5)
+		// mybook has epub/pdf/txt/opf files, but only supported book formats are listed
+		assert.Len(t, catalog.Entries, 3)
 		for _, entry := range catalog.Entries {
 			assert.NotContains(t, entry.Name, ".opf")
+			assert.NotContains(t, entry.Name, ".txt")
 		}
 	})
 
@@ -124,12 +204,13 @@ func TestBaseURL(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, string(body), `href="https://opds.example.com/"`)
-	assert.Contains(t, string(body), `href="https://opds.example.com/mybook"`)
+	assert.Contains(t, string(body), `href="https://opds.example.com/?sort=name"`)
+	assert.Contains(t, string(body), `href="https://opds.example.com/?sort=date"`)
 
 	t.Run("Search with BaseURL", func(t *testing.T) {
 		s.EnableSearch = true
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/search?q=mybook", nil)
+		req := httptest.NewRequest(http.MethodGet, "/search?q=mybook&sort=name", nil)
 
 		err := s.SearchHandler(w, req)
 		require.NoError(t, err)
@@ -139,13 +220,15 @@ func TestBaseURL(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Contains(t, string(body), `href="https://opds.example.com/mybook/mybook.epub"`)
+		assert.Contains(t, string(body), `<title>mybook.epub</title>`)
+		assert.NotContains(t, string(body), `<title>mybook/mybook.epub</title>`)
 	})
 
 	t.Run("Search browser support", func(t *testing.T) {
 		s.EnableSearch = true
 		s.EnableHTML = true
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/search?q=mybook", nil)
+		req := httptest.NewRequest(http.MethodGet, "/search?q=mybook&sort=name", nil)
 		req.Header.Set("Accept", "text/html")
 
 		err := s.SearchHandler(w, req)
@@ -157,6 +240,9 @@ func TestBaseURL(t *testing.T) {
 
 		assert.Equal(t, "text/html; charset=utf-8", resp.Header.Get("Content-Type"))
 		assert.Contains(t, string(body), "Search results for: mybook")
+		assert.Contains(t, string(body), `href="/mybook/mybook.epub"`)
+		assert.Contains(t, string(body), `>mybook.epub</a>`)
+		assert.NotContains(t, string(body), `>mybook/mybook.epub</a>`)
 	})
 
 	t.Run("OpenSearch with BaseURL", func(t *testing.T) {
@@ -183,7 +269,7 @@ func TestETagAndLastModified(t *testing.T) {
 
 	t.Run("ETag header is set", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/mybook?sort=name", nil)
 		service.TimeNow = func() time.Time {
 			return time.Date(2020, 05, 25, 00, 00, 00, 0, time.UTC)
 		}
@@ -198,7 +284,7 @@ func TestETagAndLastModified(t *testing.T) {
 
 	t.Run("Last-Modified header is set", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/mybook?sort=name", nil)
 
 		err := s.Handler(w, req)
 		require.NoError(t, err)
@@ -209,7 +295,7 @@ func TestETagAndLastModified(t *testing.T) {
 
 	t.Run("304 Not Modified with If-None-Match", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/mybook?sort=name", nil)
 		service.TimeNow = func() time.Time {
 			return time.Date(2020, 05, 25, 00, 00, 00, 0, time.UTC)
 		}
@@ -220,7 +306,7 @@ func TestETagAndLastModified(t *testing.T) {
 		etag := w.Result().Header.Get("ETag")
 
 		w2 := httptest.NewRecorder()
-		req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+		req2 := httptest.NewRequest(http.MethodGet, "/mybook?sort=name", nil)
 		req2.Header.Set("If-None-Match", etag)
 
 		err = s.Handler(w2, req2)
@@ -231,7 +317,7 @@ func TestETagAndLastModified(t *testing.T) {
 
 	t.Run("304 Not Modified with If-Modified-Since", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/mybook?sort=name", nil)
 
 		err := s.Handler(w, req)
 		require.NoError(t, err)
@@ -239,7 +325,7 @@ func TestETagAndLastModified(t *testing.T) {
 		lastModified := w.Result().Header.Get("Last-Modified")
 
 		w2 := httptest.NewRecorder()
-		req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+		req2 := httptest.NewRequest(http.MethodGet, "/mybook?sort=name", nil)
 		req2.Header.Set("If-Modified-Since", lastModified)
 
 		err = s.Handler(w2, req2)
@@ -249,32 +335,29 @@ func TestETagAndLastModified(t *testing.T) {
 	})
 }
 
-var feed = `<?xml version="1.0" encoding="UTF-8"?>
+var rootSortSelectionFeed = `<?xml version="1.0" encoding="UTF-8"?>
   <feed xmlns="http://www.w3.org/2005/Atom">
-      <title>Catalog in /</title>
+      <title>Sort catalog</title>
       <id>/</id>
+      <link rel="self" href="/" type="application/atom+xml;profile=opds-catalog;kind=navigation"></link>
       <link rel="start" href="/" type="application/atom+xml;profile=opds-catalog;kind=navigation"></link>
       <updated>2020-05-25T00:00:00+00:00</updated>
+      <author>
+          <name>dir2opds</name>
+      </author>
       <entry>
-          <title>emptyFolder</title>
-          <id>/emptyFolder</id>
-          <link rel="subsection" href="/emptyFolder" type="application/atom+xml;profile=opds-catalog;kind=acquisition" title="emptyFolder"></link>
-          <published></published>
-          <updated></updated>
+          <title>By Name</title>
+          <id>/?sort=name</id>
+          <link rel="subsection" href="/?sort=name" type="application/atom+xml;profile=opds-catalog;kind=acquisition" title="By Name"></link>
+          <published>2020-05-25T00:00:00+00:00</published>
+          <updated>2020-05-25T00:00:00+00:00</updated>
       </entry>
       <entry>
-          <title>mybook</title>
-          <id>/mybook</id>
-          <link rel="subsection" href="/mybook" type="application/atom+xml;profile=opds-catalog;kind=acquisition" title="mybook"></link>
-          <published></published>
-          <updated></updated>
-      </entry>
-      <entry>
-          <title>new folder</title>
-          <id>/new folder</id>
-          <link rel="subsection" href="/new%20folder" type="application/atom+xml;profile=opds-catalog;kind=acquisition" title="new folder"></link>
-          <published></published>
-          <updated></updated>
+          <title>By Date Added</title>
+          <id>/?sort=date</id>
+          <link rel="subsection" href="/?sort=date" type="application/atom+xml;profile=opds-catalog;kind=acquisition" title="By Date Added"></link>
+          <published>2020-05-25T00:00:00+00:00</published>
+          <updated>2020-05-25T00:00:00+00:00</updated>
       </entry>
   </feed>`
 
@@ -282,42 +365,32 @@ var acquisitionFeed = `<?xml version="1.0" encoding="UTF-8"?>
   <feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/" xmlns:opds="http://opds-spec.org/2010/catalog">
       <title>Catalog in /mybook</title>
       <id>/mybook</id>
+      <link rel="self" href="/mybook?sort=name" type="application/atom+xml;profile=opds-catalog;kind=acquisition"></link>
       <link rel="start" href="/" type="application/atom+xml;profile=opds-catalog;kind=navigation"></link>
       <updated>2020-05-25T00:00:00+00:00</updated>
+      <author>
+          <name>dir2opds</name>
+      </author>
       <entry>
           <title>mybook copy.epub</title>
-          <id>/mybookmybook copy.epub</id>
+          <id>/mybook/mybook%20copy.epub</id>
           <link rel="http://opds-spec.org/acquisition" href="/mybook/mybook%20copy.epub" type="application/epub+zip" title="mybook copy.epub"></link>
-          <published></published>
-          <updated></updated>
-      </entry>
-      <entry>
-          <title>mybook copy.txt</title>
-          <id>/mybookmybook copy.txt</id>
-          <link rel="http://opds-spec.org/acquisition" href="/mybook/mybook%20copy.txt" type="text/plain; charset=utf-8" title="mybook copy.txt"></link>
-          <published></published>
-          <updated></updated>
+          <published>2020-05-25T00:00:00+00:00</published>
+          <updated>2020-05-25T00:00:00+00:00</updated>
       </entry>
       <entry>
           <title>mybook.epub</title>
-          <id>/mybookmybook.epub</id>
+          <id>/mybook/mybook.epub</id>
           <link rel="http://opds-spec.org/acquisition" href="/mybook/mybook.epub" type="application/epub+zip" title="mybook.epub"></link>
-          <published></published>
-          <updated></updated>
+          <published>2020-05-25T00:00:00+00:00</published>
+          <updated>2020-05-25T00:00:00+00:00</updated>
       </entry>
       <entry>
           <title>mybook.pdf</title>
-          <id>/mybookmybook.pdf</id>
+          <id>/mybook/mybook.pdf</id>
           <link rel="http://opds-spec.org/acquisition" href="/mybook/mybook.pdf" type="application/pdf" title="mybook.pdf"></link>
-          <published></published>
-          <updated></updated>
-      </entry>
-      <entry>
-          <title>mybook.txt</title>
-          <id>/mybookmybook.txt</id>
-          <link rel="http://opds-spec.org/acquisition" href="/mybook/mybook.txt" type="text/plain; charset=utf-8" title="mybook.txt"></link>
-          <published></published>
-          <updated></updated>
+          <published>2020-05-25T00:00:00+00:00</published>
+          <updated>2020-05-25T00:00:00+00:00</updated>
       </entry>
   </feed>`
 
