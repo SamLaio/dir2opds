@@ -1004,10 +1004,11 @@ func staticXMLCacheTypePath(xmlPath string) string {
 	return xmlPath + ".type"
 }
 
+func staticXMLCacheETagPath(xmlPath string) string {
+	return xmlPath + ".etag"
+}
+
 func (s OPDS) serveStaticXMLCache(w http.ResponseWriter, req *http.Request) bool {
-	if s.EnableCache {
-		return false
-	}
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {
 		return false
 	}
@@ -1020,13 +1021,27 @@ func (s OPDS) serveStaticXMLCache(w http.ResponseWriter, req *http.Request) bool
 		return false
 	}
 
+	xmlPath := s.staticXMLCachePath(req)
+	if s.EnableCache {
+		if data, err := os.ReadFile(staticXMLCacheETagPath(xmlPath)); err == nil {
+			eTag := strings.TrimSpace(string(data))
+			if eTag != "" {
+				w.Header().Set("ETag", eTag)
+				if req.Header.Get("If-None-Match") == eTag {
+					w.WriteHeader(http.StatusNotModified)
+					return true
+				}
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", contentType)
 	http.ServeContent(w, req, "feed.xml", TimeNow(), bytes.NewReader(content))
 	return true
 }
 
 func (s OPDS) renderStaticXMLCacheAsHTML(w http.ResponseWriter, req *http.Request) bool {
-	if s.EnableCache || !s.EnableHTML || !isBrowser(req) {
+	if !s.EnableHTML || !isBrowser(req) {
 		return false
 	}
 	content, _, ok := s.readStaticXMLCache(req)
@@ -1055,9 +1070,10 @@ func (s OPDS) readStaticXMLCache(req *http.Request) ([]byte, string, bool) {
 }
 
 func (s OPDS) writeStaticXMLCache(req *http.Request, contentType string, content []byte) {
-	if s.EnableCache {
-		return
-	}
+	s.writeStaticXMLCacheWithETag(req, contentType, content, "")
+}
+
+func (s OPDS) writeStaticXMLCacheWithETag(req *http.Request, contentType string, content []byte, eTag string) {
 	if req.Method != http.MethodGet {
 		return
 	}
@@ -1074,6 +1090,11 @@ func (s OPDS) writeStaticXMLCache(req *http.Request, contentType string, content
 	}
 	if err := os.WriteFile(staticXMLCacheTypePath(xmlPath), []byte(contentType), 0o644); err != nil {
 		slog.Debug("write static xml cache content type failed", "path", xmlPath, "error", err)
+	}
+	if eTag != "" {
+		if err := os.WriteFile(staticXMLCacheETagPath(xmlPath), []byte(eTag), 0o644); err != nil {
+			slog.Debug("write static xml cache etag failed", "path", xmlPath, "error", err)
+		}
 	}
 }
 
@@ -1107,7 +1128,7 @@ func (s OPDS) clearStaticXMLCache() {
 			continue
 		}
 		name := entry.Name()
-		if strings.HasSuffix(name, ".xml") || strings.HasSuffix(name, ".xml.type") || strings.HasSuffix(name, ".xml.tmp") {
+		if strings.HasSuffix(name, ".xml") || strings.HasSuffix(name, ".xml.type") || strings.HasSuffix(name, ".xml.etag") || strings.HasSuffix(name, ".xml.tmp") {
 			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}
@@ -1255,7 +1276,7 @@ func (s OPDS) serveCatalogFeed(w http.ResponseWriter, req *http.Request, catalog
 	}
 
 	w.Header().Set("Content-Type", contentType)
-	s.writeStaticXMLCache(req, contentType, content)
+	s.writeStaticXMLCacheWithETag(req, contentType, content, w.Header().Get("ETag"))
 	http.ServeContent(w, req, "feed.xml", TimeNow(), bytes.NewReader(content))
 
 	return nil
