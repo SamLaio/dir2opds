@@ -87,7 +87,7 @@ func NewHandler(cfg Config) (http.Handler, string, error) {
 
 	s := service.OPDS{
 		TrustedRoot:      absolutePath,
-		ThumbDir:         filepath.Join(absolutePath, ".thumb"),
+		ThumbDir:         filepath.Join(absolutePath, "thumb"),
 		HideCalibreFiles: cfg.HideCalibreFiles,
 		HideDotFiles:     cfg.HideDotFiles,
 		NoCache:          cfg.NoCache,

@@ -58,6 +58,8 @@ func TestFileShouldBeIgnored(t *testing.T) {
 	assert.False(t, fileShouldBeIgnored("book.epub", true, true))
 	assert.True(t, fileShouldBeIgnored(".hidden", true, true))
 	assert.False(t, fileShouldBeIgnored(".hidden", true, false))
+	assert.True(t, fileShouldBeIgnored("thumb", false, false))
+	assert.True(t, fileShouldBeIgnored(".thumb", false, false))
 	assert.True(t, fileShouldBeIgnored("metadata.opf", true, true))
 	assert.False(t, fileShouldBeIgnored("metadata.opf", false, true))
 	assert.False(t, fileShouldBeIgnored(".", true, true))

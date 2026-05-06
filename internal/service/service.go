@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -63,10 +64,15 @@ const (
 )
 
 const (
-	defaultPageSize  = 50
-	maxPageSize      = 200
-	bookIndexVersion = 2
-	staticXMLVersion = 2
+	defaultPageSize     = 50
+	maxPageSize         = 50
+	backgroundBatchSize = 50
+	bookIndexVersion    = 2
+	staticXMLVersion    = 2
+
+	maxCoverReadBytes        = 8 * 1024 * 1024
+	maxPDFImageScanBytes     = 16 * 1024 * 1024
+	maxPDFEmbeddedImageBytes = maxCoverReadBytes
 )
 
 const (
@@ -75,7 +81,8 @@ const (
 	currentDirectory = "."
 	parentDirectory  = ".."
 	hiddenFilePrefix = "."
-	thumbDirectory   = ".thumb"
+	thumbDirectory   = "thumb"
+	legacyThumbDir   = ".thumb"
 )
 
 var supportedBookExtensions = map[string]bool{
@@ -333,7 +340,69 @@ func (s OPDS) WarmBookIndex() {
 			return
 		}
 		slog.Info("book index warmed", "entries", meta.Count, "duration", time.Since(start).String())
+		if s.ExtractMetadata {
+			s.warmBookCoversInBatches(backgroundBatchSize)
+		}
 	}()
+}
+
+func (s OPDS) warmBookCoversInBatches(batchSize int) {
+	if batchSize <= 0 {
+		batchSize = backgroundBatchSize
+	}
+
+	f, err := os.Open(s.diskBookIndexPath("name"))
+	if err != nil {
+		slog.Debug("book cover warmup skipped", "error", err)
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	batch := make([]diskBookRecord, 0, batchSize)
+	processed := 0
+	batchNumber := 0
+	for scanner.Scan() {
+		var record diskBookRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			slog.Debug("book cover warmup record skipped", "error", err)
+			continue
+		}
+		batch = append(batch, record)
+		if len(batch) == batchSize {
+			batchNumber++
+			processed += s.processCoverWarmupBatch(batch, batchNumber)
+			batch = batch[:0]
+		}
+	}
+	if len(batch) > 0 {
+		batchNumber++
+		processed += s.processCoverWarmupBatch(batch, batchNumber)
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Debug("book cover warmup scan failed", "error", err)
+	}
+	slog.Info("book cover warmup finished", "processed", processed, "batch_size", batchSize)
+}
+
+func (s OPDS) processCoverWarmupBatch(batch []diskBookRecord, batchNumber int) int {
+	processed := 0
+	for _, record := range batch {
+		hrefPath, err := url.PathUnescape(strings.TrimPrefix(record.Href, "/"))
+		if err != nil {
+			continue
+		}
+		sourcePath := filepath.Join(s.TrustedRoot, filepath.FromSlash(hrefPath))
+		if _, err := ensureCachedCover(s.thumbDir(), sourcePath); err != nil {
+			slog.Debug("book cover warmup skipped cover", "path", sourcePath, "error", err)
+		}
+		processed++
+	}
+	slog.Debug("book cover warmup batch finished", "batch", batchNumber, "count", processed)
+	runtime.GC()
+	return processed
 }
 
 func (s OPDS) scanBookFingerprint(rootPath string) (bookIndexFingerprint, error) {
@@ -1589,7 +1658,7 @@ func extractEpubCover(epubPath string) ([]byte, string, error) {
 	}
 	defer coverFile.Close()
 
-	coverData, err := io.ReadAll(coverFile)
+	coverData, err := readLimitedCover(coverFile)
 	if err != nil {
 		return nil, "", fmt.Errorf("reading cover: %w", err)
 	}
@@ -1619,7 +1688,7 @@ func extractFirstImageFromZip(zipPath string) ([]byte, string, error) {
 				if err != nil {
 					return nil, "", err
 				}
-				data, err := io.ReadAll(rc)
+				data, err := readLimitedCover(rc)
 				rc.Close()
 				if err != nil {
 					return nil, "", err
@@ -1632,20 +1701,87 @@ func extractFirstImageFromZip(zipPath string) ([]byte, string, error) {
 	return nil, "", nil
 }
 
+func readLimitedCover(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxCoverReadBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxCoverReadBytes {
+		return nil, fmt.Errorf("cover image is larger than %d bytes", maxCoverReadBytes)
+	}
+	return data, nil
+}
+
 func extractFirstImageFromPDF(pdfPath string) ([]byte, string, error) {
-	data, err := os.ReadFile(pdfPath)
+	f, err := os.Open(pdfPath)
 	if err != nil {
 		return nil, "", err
 	}
+	defer f.Close()
 
-	if image, ok := extractJPEGBytes(data); ok {
-		return image, ".jpg", nil
+	image, ext, err := extractFirstPDFImageBytes(f, maxPDFImageScanBytes)
+	if err != nil {
+		return nil, "", err
 	}
-	if image, ok := extractPNGBytes(data); ok {
-		return image, ".png", nil
+	if len(image) > 0 {
+		return image, ext, nil
 	}
 
 	return generatedPDFCover(pdfPath), ".svg", nil
+}
+
+func extractFirstPDFImageBytes(r io.Reader, scanLimit int64) ([]byte, string, error) {
+	reader := bufio.NewReaderSize(r, 64*1024)
+	chunk := make([]byte, 64*1024)
+	var buffer []byte
+	var scanned int64
+
+	for scanned < scanLimit {
+		readSize := len(chunk)
+		if remaining := scanLimit - scanned; remaining < int64(readSize) {
+			readSize = int(remaining)
+		}
+
+		n, err := reader.Read(chunk[:readSize])
+		if n > 0 {
+			scanned += int64(n)
+			buffer = append(buffer, chunk[:n]...)
+
+			if image, ok := extractJPEGBytes(buffer); ok {
+				return image, ".jpg", nil
+			}
+			if image, ok := extractPNGBytes(buffer); ok {
+				return image, ".png", nil
+			}
+
+			buffer = trimPDFScanBuffer(buffer)
+			if len(buffer) > maxPDFEmbeddedImageBytes {
+				return nil, "", nil
+			}
+		}
+
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	return nil, "", nil
+}
+
+func trimPDFScanBuffer(buffer []byte) []byte {
+	if start := bytes.Index(buffer, []byte{0xff, 0xd8, 0xff}); start >= 0 {
+		return buffer[start:]
+	}
+	if start := bytes.Index(buffer, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}); start >= 0 {
+		return buffer[start:]
+	}
+	if len(buffer) > 32 {
+		return buffer[len(buffer)-32:]
+	}
+	return buffer
 }
 
 func generatedPDFCover(pdfPath string) []byte {
@@ -1680,6 +1816,9 @@ func extractJPEGBytes(data []byte) ([]byte, bool) {
 		return nil, false
 	}
 	end := start + 2 + endRel + 2
+	if end-start > maxPDFEmbeddedImageBytes {
+		return nil, false
+	}
 	return data[start:end], true
 }
 
@@ -1696,6 +1835,9 @@ func extractPNGBytes(data []byte) ([]byte, bool) {
 	}
 	end := start + iendRel + len(iend) + 4
 	if end > len(data) {
+		return nil, false
+	}
+	if end-start > maxPDFEmbeddedImageBytes {
 		return nil, false
 	}
 	return data[start:end], true
@@ -1868,7 +2010,7 @@ func fileShouldBeIgnored(filename string, hideCalibreFiles, hideDotFiles bool) b
 		return includeFile
 	}
 
-	if filename == thumbDirectory {
+	if filename == thumbDirectory || filename == legacyThumbDir {
 		return ignoreFile
 	}
 

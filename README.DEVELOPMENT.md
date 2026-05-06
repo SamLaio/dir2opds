@@ -63,13 +63,13 @@ CLI 或 GUI
 封面縮圖快取位置：
 
 ```text
-<trusted root>/.thumb/
+<trusted root>/thumb/
 ```
 
 實作細節：
 
-- `OPDS.ThumbDir` 由 `internal/server` 設成 `<TrustedRoot>/.thumb`。
-- `.thumb` 會被 catalog scanning 忽略。
+- `OPDS.ThumbDir` 由 `internal/server` 設成 `<TrustedRoot>/thumb`。
+- `thumb` 會被 catalog scanning 忽略；舊版 `.thumb` 也會被跳過，避免舊快取被掃進書庫。
 - EPUB 封面擷取支援：
   - OPF `meta name="cover" content="..."`
   - EPUB3 `properties="cover-image"`
@@ -203,5 +203,5 @@ docker compose up -d --build
 2. 執行 `go test ./...`。
 3. 視需要建置 CLI。
 4. 視需要建置 Windows GUI。
-5. 確認 `docker-compose.yml`、`books/`、`.thumb/`、`*.exe` 沒有被 staged。
+5. 確認 `docker-compose.yml`、`books/`、`thumb/`、`*.exe` 沒有被 staged。
 6. 若 flags 或可見行為有變更，更新使用者文件。
