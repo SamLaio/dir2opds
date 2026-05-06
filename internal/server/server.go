@@ -28,6 +28,7 @@ type Config struct {
 	MimeMap          map[string]string
 	EnableSearch     bool
 	ExtractMetadata  bool
+	CoverWarmup      bool
 	EnableHTML       bool
 	BaseURL          string
 	PageSize         int
@@ -97,6 +98,7 @@ func NewHandler(cfg Config) (http.Handler, string, error) {
 		MimeMap:          cfg.MimeMap,
 		EnableSearch:     cfg.EnableSearch,
 		ExtractMetadata:  cfg.ExtractMetadata,
+		CoverWarmup:      cfg.CoverWarmup,
 		EnableHTML:       cfg.EnableHTML,
 		BaseURL:          cfg.BaseURL,
 		PageSize:         cfg.PageSize,

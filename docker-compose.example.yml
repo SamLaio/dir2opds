@@ -16,5 +16,9 @@ services:
       - "8080"
       - -enable-html
       - -gzip
-      - -extract-metadata
+      # 只有需要顯示書名、作者或封面時才啟用 metadata 擷取。
+      # 這會讀取書籍壓縮檔，可能增加 Linux filesystem cache。
+      # - -extract-metadata
+      # 只有明確想在啟動時預先掃描全部封面時才啟用封面暖機。
+      # - -cover-warmup
     restart: unless-stopped

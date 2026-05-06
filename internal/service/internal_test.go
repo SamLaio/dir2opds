@@ -110,6 +110,18 @@ func TestExtractMetadata(t *testing.T) {
 	})
 }
 
+func TestEnsureCachedCoverUsesExistingThumbBeforeOpeningSource(t *testing.T) {
+	thumbDir := t.TempDir()
+	sourcePath := filepath.Join(t.TempDir(), "missing.epub")
+	thumbPath := thumbPathForSource(thumbDir, sourcePath, ".jpg")
+
+	require.NoError(t, os.WriteFile(thumbPath, []byte("cached cover"), 0o644))
+
+	got, err := ensureCachedCover(thumbDir, sourcePath)
+	require.NoError(t, err)
+	assert.Equal(t, thumbPath, got)
+}
+
 func TestParsePage(t *testing.T) {
 	assert.Equal(t, 1, parsePage(""))
 	assert.Equal(t, 1, parsePage("invalid"))
@@ -277,7 +289,7 @@ func TestFindEpubCover(t *testing.T) {
 		}
 		require.NotEmpty(t, opfPath, "should find OPF file")
 
-		coverPath := findEpubCover(r, nil, nil, opfPath)
+		coverPath := findEpubCover(&r.Reader, nil, nil, opfPath)
 		t.Logf("Found cover path: %q", coverPath)
 	})
 }
@@ -301,7 +313,7 @@ func TestFindEpubCoverFromMetaCoverXHTML(t *testing.T) {
 	defer r.Close()
 
 	items, metas := readTestOPF(t, &r.Reader, "OPS/content.opf")
-	assert.Equal(t, "OPS/images/frontcover.jpg", findEpubCover(r, items, metas, "OPS/content.opf"))
+	assert.Equal(t, "OPS/images/frontcover.jpg", findEpubCover(&r.Reader, items, metas, "OPS/content.opf"))
 }
 
 func TestFindEpubCoverFromPropertiesCoverImage(t *testing.T) {
@@ -321,7 +333,7 @@ func TestFindEpubCoverFromPropertiesCoverImage(t *testing.T) {
 	defer r.Close()
 
 	items, metas := readTestOPF(t, &r.Reader, "OPS/content.opf")
-	assert.Equal(t, "OPS/images/cover.png", findEpubCover(r, items, metas, "OPS/content.opf"))
+	assert.Equal(t, "OPS/images/cover.png", findEpubCover(&r.Reader, items, metas, "OPS/content.opf"))
 }
 
 func TestExtractFirstImageFromPDF(t *testing.T) {

@@ -106,6 +106,7 @@ type OPDS struct {
 	MimeMap          map[string]string
 	EnableSearch     bool
 	ExtractMetadata  bool
+	CoverWarmup      bool
 	EnableHTML       bool
 	BaseURL          string
 	PageSize         int
@@ -340,7 +341,7 @@ func (s OPDS) WarmBookIndex() {
 			return
 		}
 		slog.Info("book index warmed", "entries", meta.Count, "duration", time.Since(start).String())
-		if s.ExtractMetadata {
+		if s.ExtractMetadata && s.CoverWarmup {
 			s.warmBookCoversInBatches(backgroundBatchSize)
 		}
 	}()
@@ -712,7 +713,23 @@ func thumbPathForSource(baseDir, sourcePath, coverExt string) string {
 	return filepath.Join(baseDir, name)
 }
 
+func cachedThumbPathForSource(baseDir, sourcePath string) string {
+	sum := sha1.Sum([]byte(sourcePath))
+	prefix := hex.EncodeToString(sum[:])
+	for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"} {
+		thumbPath := filepath.Join(baseDir, prefix+ext)
+		if _, err := os.Stat(thumbPath); err == nil {
+			return thumbPath
+		}
+	}
+	return ""
+}
+
 func ensureCachedCover(baseDir, sourcePath string) (string, error) {
+	if cachedPath := cachedThumbPathForSource(baseDir, sourcePath); cachedPath != "" {
+		return cachedPath, nil
+	}
+
 	coverData, coverExt, err := extractCoverForFile(sourcePath)
 	if err != nil || len(coverData) == 0 || coverExt == "" {
 		return "", err
@@ -770,12 +787,36 @@ func cleanupThumbCache(baseDir string) {
 	}
 }
 
+func openAdvisedZipReader(filePath string) (*zip.Reader, func(), error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+
+	r, err := zip.NewReader(f, info.Size())
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+
+	return r, func() {
+		fadviseDontNeed(f)
+		_ = f.Close()
+	}, nil
+}
+
 func extractEpubMetadata(path string) (string, string, string) {
-	r, err := zip.OpenReader(path)
+	r, closeZip, err := openAdvisedZipReader(path)
 	if err != nil {
 		return "", "", ""
 	}
-	defer r.Close()
+	defer closeZip()
 
 	var opfPath string
 	for _, f := range r.File {
@@ -841,7 +882,7 @@ func extractEpubMetadata(path string) (string, string, string) {
 	return opf.Metadata.Title, opf.Metadata.Creator, coverPath
 }
 
-func findEpubCover(r *zip.ReadCloser, items []epubManifestItem, metas []epubMeta, opfPath string) string {
+func findEpubCover(r *zip.Reader, items []epubManifestItem, metas []epubMeta, opfPath string) string {
 	coverIDs := []string{"cover", "cover-image", "coverimage", "frontcover", "front-cover"}
 	imageExtensions := []string{".jpg", ".jpeg", ".png", ".gif", ".webp"}
 	opfDir := path.Dir(opfPath)
@@ -911,7 +952,7 @@ func findEpubCover(r *zip.ReadCloser, items []epubManifestItem, metas []epubMeta
 	return ""
 }
 
-func coverPathFromItem(r *zip.ReadCloser, opfDir string, item epubManifestItem) string {
+func coverPathFromItem(r *zip.Reader, opfDir string, item epubManifestItem) string {
 	if item.Href == "" {
 		return ""
 	}
@@ -930,7 +971,7 @@ func coverPathFromItem(r *zip.ReadCloser, opfDir string, item epubManifestItem) 
 	return ""
 }
 
-func coverPathFromHTML(r *zip.ReadCloser, opfDir, htmlPath string) string {
+func coverPathFromHTML(r *zip.Reader, opfDir, htmlPath string) string {
 	f, err := r.Open(htmlPath)
 	if err != nil {
 		return ""
@@ -1604,11 +1645,11 @@ func (s OPDS) CoverHandler(w http.ResponseWriter, req *http.Request) error {
 
 // extractEpubCover extracts the cover image from an EPUB file
 func extractEpubCover(epubPath string) ([]byte, string, error) {
-	r, err := zip.OpenReader(epubPath)
+	r, closeZip, err := openAdvisedZipReader(epubPath)
 	if err != nil {
 		return nil, "", fmt.Errorf("opening epub: %w", err)
 	}
-	defer r.Close()
+	defer closeZip()
 
 	var opfPath string
 	for _, f := range r.File {
@@ -1673,11 +1714,11 @@ func extractEpubCover(epubPath string) ([]byte, string, error) {
 }
 
 func extractFirstImageFromZip(zipPath string) ([]byte, string, error) {
-	r, err := zip.OpenReader(zipPath)
+	r, closeZip, err := openAdvisedZipReader(zipPath)
 	if err != nil {
 		return nil, "", err
 	}
-	defer r.Close()
+	defer closeZip()
 
 	imageExt := []string{".jpg", ".jpeg", ".png", ".gif", ".webp"}
 	for _, f := range r.File {
@@ -1717,7 +1758,10 @@ func extractFirstImageFromPDF(pdfPath string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	defer f.Close()
+	defer func() {
+		fadviseDontNeed(f)
+		_ = f.Close()
+	}()
 
 	image, ext, err := extractFirstPDFImageBytes(f, maxPDFImageScanBytes)
 	if err != nil {

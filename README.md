@@ -162,6 +162,7 @@ epub, cbz, zip, pdf
 | `-no-cache` | 加上 no-cache headers。 |
 | `-page-size` | 每頁筆數，最大 200。 |
 | `-no-pagination` | 關閉分頁。 |
+| `-cover-warmup` | 啟用 metadata 擷取時，背景預先抽取所有封面。預設關閉以降低 filesystem cache 壓力。 |
 | `-url` | OPDS 絕對連結用的 base URL。 |
 | `-log-format` | `json` 或 `text`。 |
 | `-debug` | 啟用 debug log。 |
