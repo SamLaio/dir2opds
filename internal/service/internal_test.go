@@ -251,6 +251,17 @@ func TestEtag(t *testing.T) {
 	assert.True(t, strings.HasSuffix(etag1, `"`), "etag should be quoted")
 }
 
+func TestCoverContentType(t *testing.T) {
+	assert.Equal(t, "image/jpeg", coverContentType("cover.unknown"))
+	assert.Equal(t, "image/png", coverContentType("cover.PNG"))
+}
+
+func TestGetFileContentType(t *testing.T) {
+	s := OPDS{}
+	assert.Equal(t, "application/zip", s.getFileContentType("book.unknown"))
+	assert.Equal(t, "application/pdf", s.getFileContentType("book.PDF"))
+}
+
 func TestCatalogModTime(t *testing.T) {
 	s := OPDS{TrustedRoot: "testdata", HideCalibreFiles: true, HideDotFiles: true}
 

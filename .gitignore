@@ -46,3 +46,4 @@ docker-compose.yml
 pushDocker.bat
 oldOnline.docker.yml
 .cache
+todo.txt

@@ -2158,15 +2158,16 @@ func (s OPDS) makeFeed(catalog *Catalog, req *http.Request) atom.Feed {
 
 	if catalog.Cover != "" {
 		coverHref := s.joinURL((&url.URL{Path: catalog.Cover}).String())
+		coverType := coverContentType(catalog.Cover)
 		feedBuilder = feedBuilder.AddLink(opds.LinkBuilder.
 			Rel("http://opds-spec.org/image").
 			Href(coverHref).
-			Type(mime.TypeByExtension(filepath.Ext(catalog.Cover))).
+			Type(coverType).
 			Build())
 		feedBuilder = feedBuilder.AddLink(opds.LinkBuilder.
 			Rel("http://opds-spec.org/image/thumbnail").
 			Href(coverHref).
-			Type(mime.TypeByExtension(filepath.Ext(catalog.Cover))).
+			Type(coverType).
 			Build())
 	}
 
@@ -2304,6 +2305,14 @@ func getRel(name string, pathType int) string {
 	return "http://opds-spec.org/acquisition"
 }
 
+func coverContentType(name string) string {
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
+	if contentType == "" {
+		return "image/jpeg"
+	}
+	return contentType
+}
+
 func (s OPDS) getType(name string, pathType int) string {
 	switch pathType {
 	case pathTypeFile:
@@ -2326,7 +2335,7 @@ func (s OPDS) getFileContentType(name string) string {
 	}
 	contentType := mime.TypeByExtension(ext)
 	if contentType == "" {
-		return "application/octet-stream"
+		return "application/zip"
 	}
 	return contentType
 }
