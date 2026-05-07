@@ -15,6 +15,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func tempDirUnderWorkspace(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", "tmp-test-")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = os.RemoveAll(dir)
+	})
+	return dir
+}
+
 func TestHandler(t *testing.T) {
 	// pre-setup
 	nowFn := service.TimeNow
@@ -78,6 +88,50 @@ func TestHandler(t *testing.T) {
 		})
 	}
 
+}
+
+func TestAcquisitionFeedUsesBuiltInEbookMimeTypes(t *testing.T) {
+	root := tempDirUnderWorkspace(t)
+	require.NoError(t, os.Mkdir(filepath.Join(root, "books"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "books", "sample.azw3"), []byte("book"), 0o644))
+
+	s := service.OPDS{TrustedRoot: root}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/books?sort=name", nil)
+
+	err := s.Handler(w, req)
+	require.NoError(t, err)
+
+	resp := w.Result()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), `href="/books/sample.azw3" type="application/vnd.amazon.ebook"`)
+	assert.NotContains(t, string(body), `href="/books/sample.azw3" type="application/octet-stream"`)
+}
+
+func TestFileServingUsesCustomMimeMap(t *testing.T) {
+	root := tempDirUnderWorkspace(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "sample.book"), []byte("book"), 0o644))
+
+	s := service.OPDS{
+		TrustedRoot: root,
+		MimeMap:     map[string]string{".book": "application/x-test-book"},
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sample.book", nil)
+
+	err := s.Handler(w, req)
+	require.NoError(t, err)
+
+	resp := w.Result()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/x-test-book", resp.Header.Get("Content-Type"))
+	assert.Equal(t, "book", string(body))
 }
 
 func TestSortSelectionFeed(t *testing.T) {
@@ -167,6 +221,45 @@ func TestSortSelectionHTMLBypassesConditionalCache(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, string(body), "By Name")
 	assert.Contains(t, string(body), "By Date Added")
+}
+
+func TestStaticXMLCacheRefreshesWhenDirectoryChanges(t *testing.T) {
+	rootDir := tempDirUnderWorkspace(t)
+	thumbDir := tempDirUnderWorkspace(t)
+	bookDir := filepath.Join(rootDir, "books")
+	require.NoError(t, os.Mkdir(bookDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bookDir, "first.epub"), []byte("first"), 0o644))
+
+	s := service.OPDS{
+		TrustedRoot: rootDir,
+		ThumbDir:    thumbDir,
+		SortBy:      "name",
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/books?sort=name", nil)
+	require.NoError(t, s.Handler(w, req))
+	firstBody, err := io.ReadAll(w.Result().Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(firstBody), "first.epub")
+	assert.NotContains(t, string(firstBody), "second.epub")
+
+	cacheFiles, err := filepath.Glob(filepath.Join(thumbDir, "static-xml", "*.xml"))
+	require.NoError(t, err)
+	require.Len(t, cacheFiles, 1)
+	metaFiles, err := filepath.Glob(filepath.Join(thumbDir, "static-xml", "*.xml.meta.json"))
+	require.NoError(t, err)
+	require.Len(t, metaFiles, 1)
+
+	require.NoError(t, os.WriteFile(filepath.Join(bookDir, "second.epub"), []byte("second"), 0o644))
+
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/books?sort=name", nil)
+	require.NoError(t, s.Handler(w2, req2))
+	secondBody, err := io.ReadAll(w2.Result().Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(secondBody), "first.epub")
+	assert.Contains(t, string(secondBody), "second.epub")
 }
 
 func TestScan(t *testing.T) {

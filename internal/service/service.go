@@ -48,12 +48,21 @@ type epubMeta struct {
 }
 
 func init() {
-	_ = mime.AddExtensionType(".mobi", "application/x-mobipocket-ebook")
-	_ = mime.AddExtensionType(".epub", "application/epub+zip")
-	_ = mime.AddExtensionType(".cbz", "application/x-cbz")
+	_ = mime.AddExtensionType(".azw", "application/vnd.amazon.ebook")
+	_ = mime.AddExtensionType(".azw3", "application/vnd.amazon.ebook")
+	_ = mime.AddExtensionType(".azw4", "application/vnd.amazon.ebook")
 	_ = mime.AddExtensionType(".cbr", "application/x-cbr")
+	_ = mime.AddExtensionType(".cbz", "application/x-cbz")
+	_ = mime.AddExtensionType(".djv", "image/vnd.djvu")
+	_ = mime.AddExtensionType(".djvu", "image/vnd.djvu")
+	_ = mime.AddExtensionType(".epub", "application/epub+zip")
 	_ = mime.AddExtensionType(".fb2", "text/fb2+xml")
+	_ = mime.AddExtensionType(".kepub", "application/epub+zip")
+	_ = mime.AddExtensionType(".kfx", "application/vnd.amazon.ebook")
+	_ = mime.AddExtensionType(".lit", "application/x-ms-reader")
+	_ = mime.AddExtensionType(".mobi", "application/x-mobipocket-ebook")
 	_ = mime.AddExtensionType(".pdf", "application/pdf")
+	_ = mime.AddExtensionType(".prc", "application/x-mobipocket-ebook")
 	_ = mime.AddExtensionType(".txt", "text/plain; charset=utf-8")
 }
 
@@ -67,8 +76,8 @@ const (
 	defaultPageSize     = 50
 	maxPageSize         = 50
 	backgroundBatchSize = 50
-	bookIndexVersion    = 2
-	staticXMLVersion    = 2
+	bookIndexVersion    = 3
+	staticXMLVersion    = 3
 
 	maxCoverReadBytes        = 8 * 1024 * 1024
 	maxPDFImageScanBytes     = 16 * 1024 * 1024
@@ -86,10 +95,22 @@ const (
 )
 
 var supportedBookExtensions = map[string]bool{
-	".epub": true,
-	".cbz":  true,
-	".zip":  true,
-	".pdf":  true,
+	".azw":   true,
+	".azw3":  true,
+	".azw4":  true,
+	".cbr":   true,
+	".cbz":   true,
+	".djv":   true,
+	".djvu":  true,
+	".epub":  true,
+	".fb2":   true,
+	".kepub": true,
+	".kfx":   true,
+	".lit":   true,
+	".mobi":  true,
+	".pdf":   true,
+	".prc":   true,
+	".zip":   true,
 }
 
 var diskBookIndexMu sync.Mutex
@@ -116,6 +137,24 @@ type OPDS struct {
 type bookIndexFingerprint struct {
 	Count         int
 	LatestModTime time.Time
+	Hash          string
+}
+
+type staticXMLCacheMeta struct {
+	Version          int    `json:"version"`
+	RequestURI       string `json:"request_uri"`
+	TrustedRoot      string `json:"trusted_root"`
+	BaseURL          string `json:"base_url"`
+	Scope            string `json:"scope"`
+	PathType         int    `json:"path_type"`
+	HideCalibreFiles bool   `json:"hide_calibre_files"`
+	HideDotFiles     bool   `json:"hide_dot_files"`
+	ShowCovers       bool   `json:"show_covers"`
+	PageSize         int    `json:"page_size"`
+	NoPagination     bool   `json:"no_pagination"`
+	Count            int    `json:"count"`
+	LatestModTime    int64  `json:"latest_mod_time"`
+	Hash             string `json:"hash"`
 }
 
 type diskBookIndexMeta struct {
@@ -126,6 +165,7 @@ type diskBookIndexMeta struct {
 	Version          int    `json:"version"`
 	Count            int    `json:"count"`
 	LatestModTime    int64  `json:"latest_mod_time"`
+	Hash             string `json:"hash"`
 }
 
 type diskBookRecord struct {
@@ -406,8 +446,24 @@ func (s OPDS) processCoverWarmupBatch(batch []diskBookRecord, batchNumber int) i
 	return processed
 }
 
+func writeFingerprintEntry(h hashWriter, name string, pathType int, size int64, modTime time.Time) {
+	_, _ = io.WriteString(h, name)
+	_, _ = io.WriteString(h, "\x00")
+	_, _ = io.WriteString(h, strconv.Itoa(pathType))
+	_, _ = io.WriteString(h, "\x00")
+	_, _ = io.WriteString(h, strconv.FormatInt(size, 10))
+	_, _ = io.WriteString(h, "\x00")
+	_, _ = io.WriteString(h, strconv.FormatInt(modTime.UTC().UnixNano(), 10))
+	_, _ = io.WriteString(h, "\x00")
+}
+
+type hashWriter interface {
+	io.Writer
+}
+
 func (s OPDS) scanBookFingerprint(rootPath string) (bookIndexFingerprint, error) {
 	var fingerprint bookIndexFingerprint
+	h := sha256.New()
 	err := filepath.WalkDir(rootPath, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -430,17 +486,24 @@ func (s OPDS) scanBookFingerprint(rootPath string) (bookIndexFingerprint, error)
 		if fingerprint.LatestModTime.IsZero() || info.ModTime().After(fingerprint.LatestModTime) {
 			fingerprint.LatestModTime = info.ModTime()
 		}
+		relPath, err := filepath.Rel(s.TrustedRoot, path)
+		if err != nil {
+			return err
+		}
+		writeFingerprintEntry(h, filepath.ToSlash(relPath), pathTypeFile, info.Size(), info.ModTime())
 		return nil
 	})
 	if err != nil {
 		return bookIndexFingerprint{}, err
 	}
+	fingerprint.Hash = hex.EncodeToString(h.Sum(nil))
 	return fingerprint, nil
 }
 
 func (s OPDS) scanBookEntries(rootPath string) ([]CatalogEntry, bookIndexFingerprint, error) {
 	var entries []CatalogEntry
 	var fingerprint bookIndexFingerprint
+	h := sha256.New()
 
 	err := filepath.WalkDir(rootPath, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -471,6 +534,7 @@ func (s OPDS) scanBookEntries(rootPath string) ([]CatalogEntry, bookIndexFingerp
 		if fingerprint.LatestModTime.IsZero() || info.ModTime().After(fingerprint.LatestModTime) {
 			fingerprint.LatestModTime = info.ModTime()
 		}
+		writeFingerprintEntry(h, filepath.ToSlash(relPath), pathTypeFile, info.Size(), info.ModTime())
 
 		entries = append(entries, CatalogEntry{
 			Name:    info.Name(),
@@ -484,6 +548,7 @@ func (s OPDS) scanBookEntries(rootPath string) ([]CatalogEntry, bookIndexFingerp
 	if err != nil {
 		return nil, bookIndexFingerprint{}, err
 	}
+	fingerprint.Hash = hex.EncodeToString(h.Sum(nil))
 
 	return entries, fingerprint, nil
 }
@@ -514,6 +579,7 @@ func (s OPDS) expectedDiskBookIndexMeta(rootPath string, fingerprint bookIndexFi
 		Version:          bookIndexVersion,
 		Count:            fingerprint.Count,
 		LatestModTime:    fingerprint.LatestModTime.UnixNano(),
+		Hash:             fingerprint.Hash,
 	}
 }
 
@@ -524,7 +590,8 @@ func (m diskBookIndexMeta) matches(other diskBookIndexMeta) bool {
 		m.HideDotFiles == other.HideDotFiles &&
 		m.Version == other.Version &&
 		m.Count == other.Count &&
-		m.LatestModTime == other.LatestModTime
+		m.LatestModTime == other.LatestModTime &&
+		m.Hash == other.Hash
 }
 
 func (s OPDS) readDiskBookIndexMeta() (diskBookIndexMeta, error) {
@@ -1118,6 +1185,10 @@ func staticXMLCacheETagPath(xmlPath string) string {
 	return xmlPath + ".etag"
 }
 
+func staticXMLCacheMetaPath(xmlPath string) string {
+	return xmlPath + ".meta.json"
+}
+
 func (s OPDS) serveStaticXMLCache(w http.ResponseWriter, req *http.Request) bool {
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {
 		return false
@@ -1167,6 +1238,9 @@ func (s OPDS) renderStaticXMLCacheAsHTML(w http.ResponseWriter, req *http.Reques
 
 func (s OPDS) readStaticXMLCache(req *http.Request) ([]byte, string, bool) {
 	xmlPath := s.staticXMLCachePath(req)
+	if !s.staticXMLCacheIsFresh(req, xmlPath) {
+		return nil, "", false
+	}
 	content, err := os.ReadFile(xmlPath)
 	if err != nil {
 		return nil, "", false
@@ -1177,6 +1251,40 @@ func (s OPDS) readStaticXMLCache(req *http.Request) ([]byte, string, bool) {
 		contentType = strings.TrimSpace(string(data))
 	}
 	return content, contentType, true
+}
+
+func (s OPDS) staticXMLCacheIsFresh(req *http.Request, xmlPath string) bool {
+	data, err := os.ReadFile(staticXMLCacheMetaPath(xmlPath))
+	if err != nil {
+		return false
+	}
+	var cached staticXMLCacheMeta
+	if err := json.Unmarshal(data, &cached); err != nil {
+		return false
+	}
+	current, err := s.staticXMLCacheMeta(req)
+	if err != nil {
+		slog.Debug("static xml cache freshness check failed", "uri", req.URL.RequestURI(), "error", err)
+		return false
+	}
+	return cached.matches(current)
+}
+
+func (m staticXMLCacheMeta) matches(other staticXMLCacheMeta) bool {
+	return m.Version == other.Version &&
+		m.RequestURI == other.RequestURI &&
+		m.TrustedRoot == other.TrustedRoot &&
+		m.BaseURL == other.BaseURL &&
+		m.Scope == other.Scope &&
+		m.PathType == other.PathType &&
+		m.HideCalibreFiles == other.HideCalibreFiles &&
+		m.HideDotFiles == other.HideDotFiles &&
+		m.ShowCovers == other.ShowCovers &&
+		m.PageSize == other.PageSize &&
+		m.NoPagination == other.NoPagination &&
+		m.Count == other.Count &&
+		m.LatestModTime == other.LatestModTime &&
+		m.Hash == other.Hash
 }
 
 func (s OPDS) writeStaticXMLCache(req *http.Request, contentType string, content []byte) {
@@ -1206,6 +1314,19 @@ func (s OPDS) writeStaticXMLCacheWithETag(req *http.Request, contentType string,
 			slog.Debug("write static xml cache etag failed", "path", xmlPath, "error", err)
 		}
 	}
+	meta, err := s.staticXMLCacheMeta(req)
+	if err != nil {
+		slog.Debug("build static xml cache meta failed", "path", xmlPath, "error", err)
+		return
+	}
+	metaData, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		slog.Debug("marshal static xml cache meta failed", "path", xmlPath, "error", err)
+		return
+	}
+	if err := os.WriteFile(staticXMLCacheMetaPath(xmlPath), metaData, 0o644); err != nil {
+		slog.Debug("write static xml cache meta failed", "path", xmlPath, "error", err)
+	}
 }
 
 func (s OPDS) writeCatalogStaticXMLCache(req *http.Request, catalog *Catalog) error {
@@ -1227,6 +1348,99 @@ func (s OPDS) writeSortSelectionStaticXMLCache(req *http.Request) error {
 	return nil
 }
 
+func (s OPDS) staticXMLCacheMeta(req *http.Request) (staticXMLCacheMeta, error) {
+	scope, count, latestModTime, fingerprintHash, pathType, err := s.staticXMLFingerprint(req)
+	if err != nil {
+		return staticXMLCacheMeta{}, err
+	}
+	return staticXMLCacheMeta{
+		Version:          staticXMLVersion,
+		RequestURI:       req.URL.RequestURI(),
+		TrustedRoot:      s.TrustedRoot,
+		BaseURL:          s.BaseURL,
+		Scope:            scope,
+		PathType:         pathType,
+		HideCalibreFiles: s.HideCalibreFiles,
+		HideDotFiles:     s.HideDotFiles,
+		ShowCovers:       s.ShowCovers,
+		PageSize:         s.pageSize(),
+		NoPagination:     s.NoPagination,
+		Count:            count,
+		LatestModTime:    latestModTime.UTC().UnixNano(),
+		Hash:             fingerprintHash,
+	}, nil
+}
+
+func (s OPDS) staticXMLFingerprint(req *http.Request) (string, int, time.Time, string, int, error) {
+	if req.URL.Path == "/search" || (req.URL.Path == "/" && req.URL.Query().Get("sort") != "") {
+		fingerprint, err := s.scanBookFingerprint(s.TrustedRoot)
+		if err != nil {
+			return "", 0, time.Time{}, "", 0, err
+		}
+		return "book-index", fingerprint.Count, fingerprint.LatestModTime, fingerprint.Hash, pathTypeDirOfFiles, nil
+	}
+
+	urlPath, err := url.PathUnescape(req.URL.Path)
+	if err != nil {
+		return "", 0, time.Time{}, "", 0, err
+	}
+	fPath := filepath.Join(s.TrustedRoot, filepath.FromSlash(strings.TrimPrefix(urlPath, "/")))
+	if _, err := verifyPath(fPath, s.TrustedRoot); err != nil {
+		return "", 0, time.Time{}, "", 0, err
+	}
+	return s.directoryStaticXMLFingerprint(fPath)
+}
+
+func (s OPDS) directoryStaticXMLFingerprint(fPath string) (string, int, time.Time, string, int, error) {
+	dirInfo, err := os.Stat(fPath)
+	if err != nil {
+		return "", 0, time.Time{}, "", 0, err
+	}
+	if isFile(dirInfo) {
+		return "", 0, time.Time{}, "", 0, fmt.Errorf("static xml cache path is not a directory: %s", fPath)
+	}
+
+	dirEntries, err := os.ReadDir(fPath)
+	if err != nil {
+		return "", 0, time.Time{}, "", 0, err
+	}
+
+	h := sha256.New()
+	pathType := pathTypeDirOfDirs
+	latestModTime := dirInfo.ModTime()
+	count := 0
+	for _, entry := range dirEntries {
+		if fileShouldBeIgnored(entry.Name(), s.HideCalibreFiles, s.HideDotFiles) {
+			continue
+		}
+		if s.ShowCovers && (entry.Name() == "cover.jpg" || entry.Name() == "folder.jpg") {
+			continue
+		}
+
+		entryPath := filepath.Join(fPath, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			slog.Debug("error getting info for static xml fingerprint", "path", entryPath, "error", err)
+			continue
+		}
+		entryPathType := getPathType(entryPath)
+		if !entry.IsDir() {
+			if !isSupportedBookFile(entry.Name()) {
+				continue
+			}
+			pathType = pathTypeDirOfFiles
+		}
+
+		count++
+		if info.ModTime().After(latestModTime) {
+			latestModTime = info.ModTime()
+		}
+		writeFingerprintEntry(h, entry.Name(), entryPathType, info.Size(), info.ModTime())
+	}
+
+	return "directory", count, latestModTime, hex.EncodeToString(h.Sum(nil)), pathType, nil
+}
+
 func (s OPDS) clearStaticXMLCache() {
 	dir := s.staticXMLCacheDir()
 	entries, err := os.ReadDir(dir)
@@ -1238,7 +1452,7 @@ func (s OPDS) clearStaticXMLCache() {
 			continue
 		}
 		name := entry.Name()
-		if strings.HasSuffix(name, ".xml") || strings.HasSuffix(name, ".xml.type") || strings.HasSuffix(name, ".xml.etag") || strings.HasSuffix(name, ".xml.tmp") {
+		if strings.HasSuffix(name, ".xml") || strings.HasSuffix(name, ".xml.type") || strings.HasSuffix(name, ".xml.etag") || strings.HasSuffix(name, ".xml.tmp") || strings.HasSuffix(name, ".xml.meta.json") {
 			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}
@@ -1255,7 +1469,7 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 		return err
 	}
 
-	fPath := filepath.Join(s.TrustedRoot, urlPath)
+	fPath := filepath.Join(s.TrustedRoot, filepath.FromSlash(strings.TrimPrefix(urlPath, "/")))
 
 	// verifyPath avoid the http transversal by checking the path is under DirRoot
 	_, err = verifyPath(fPath, s.TrustedRoot)
@@ -1275,6 +1489,7 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 
 	// it's a file just serve the file
 	if pathType == pathTypeFile {
+		w.Header().Set("Content-Type", s.getFileContentType(fPath))
 		http.ServeFile(w, req, fPath)
 		return nil
 	}
@@ -2092,17 +2307,7 @@ func getRel(name string, pathType int) string {
 func (s OPDS) getType(name string, pathType int) string {
 	switch pathType {
 	case pathTypeFile:
-		ext := filepath.Ext(name)
-		if s.MimeMap != nil {
-			if mType, ok := s.MimeMap[ext]; ok {
-				return mType
-			}
-		}
-		contentType := mime.TypeByExtension(ext)
-		if contentType == "" {
-			return "application/octet-stream"
-		}
-		return contentType
+		return s.getFileContentType(name)
 	case pathTypeDirOfFiles:
 		return acquisitionType
 	case pathTypeDirOfDirs:
@@ -2110,6 +2315,20 @@ func (s OPDS) getType(name string, pathType int) string {
 	default:
 		return mime.TypeByExtension("xml")
 	}
+}
+
+func (s OPDS) getFileContentType(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	if s.MimeMap != nil {
+		if mType, ok := s.MimeMap[ext]; ok {
+			return mType
+		}
+	}
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		return "application/octet-stream"
+	}
+	return contentType
 }
 
 func getPathType(dirpath string) int {
