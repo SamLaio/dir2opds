@@ -11,7 +11,7 @@
 ├── internal/server/server.go       # CLI 和 GUI 共用的 HTTP server wiring
 ├── internal/service/               # OPDS、HTML、搜尋、封面、gzip、health
 ├── opds/                           # Atom/OPDS builder helpers
-├── Containerfile                   # Docker image
+├── Containerfile                   # 本機容器映像建置檔
 ├── docker-compose.example.yml      # 本機 Docker 範本
 ├── Makefile
 └── README.md                       # 一般使用者文件
@@ -41,34 +41,39 @@ CLI 或 GUI
 
 ## 書庫行為
 
-目前的使用者流程刻意設計成扁平化：
+目前的使用者流程刻意設計成「入口簡單、書單扁平」：
 
-- 根目錄 `/` 只先回傳排序選項：`By Name` 與 `By Date Added`。
-- `/?sort=name` 與 `/?sort=date` 會遞迴掃描整個 trusted root，回傳扁平化書單。
-- 搜尋也使用同樣流程：
-  - `/search?q=term` 回傳排序選項。
-  - `/search?q=term&sort=name` 或 `sort=date` 回傳扁平化搜尋結果。
+- 單書庫模式下，根目錄 `/` 先回傳排序選項：`By Name`、`By Date Added`、`By Type`。
+- 多書庫模式下，根目錄 `/` 先回傳各書庫入口；`/?sort=name`、`/?sort=date` 可跨所有書庫顯示扁平化結果，`/?sort=type` 會跨所有書庫顯示類型入口。
+- `?sort=name` 與 `?sort=date` 會遞迴掃描 trusted root，回傳扁平化書單。
+- `?sort=type` 會先回傳可用檔案類型；`?sort=type&type=epub` 才回傳該類型的扁平化書單。
+- 搜尋 `/search?q=term` 會直接回傳搜尋結果，不再要求使用者先選排序；若帶 `sort=type` 且未指定 `type`，則先回傳符合搜尋條件的類型清單。
 - 真實相對路徑存放在 `CatalogEntry.Href`。
 - 顯示名稱應只使用檔名或擷取出的 metadata title。
 - 正常使用流程中，不應把資料夾路徑顯示成可選項目。
 
-支援顯示的格式限制為：
+書庫列出/下載的副檔名白名單為：
 
 ```text
-.epub, .cbz, .zip, .pdf
+.azw, .azw3, .azw4, .cbr, .cbz, .djv, .djvu, .epub, .fb2, .kepub, .kfx, .lit, .mobi, .pdf, .prc, .zip
 ```
+
+這份白名單只代表會出現在 catalog 並提供下載，不代表每個格式都有內容解析器。metadata 擷取目前只有 EPUB/PDF；封面擷取目前只有 EPUB、CBZ/ZIP、PDF。CBR 等其他格式會列出與下載，但不會解析內容。
 
 ## 封面
 
-封面縮圖快取位置：
+單書庫模式的封面縮圖快取位置：
 
 ```text
 <trusted root>/thumb/
 ```
 
+多書庫模式會以第一個書庫的 `thumb/libraries/<slug>/` 作為各書庫快取根目錄。
+
 實作細節：
 
-- `OPDS.ThumbDir` 由 `internal/server` 設成 `<TrustedRoot>/thumb`。
+- 單書庫模式下，`OPDS.ThumbDir` 由 `internal/server` 設成 `<TrustedRoot>/thumb`。
+- 多書庫模式下，每個書庫會透過 `OPDS.forLibrary` 使用獨立的 `ThumbDir`，避免封面和索引互相覆蓋。
 - `thumb` 會被 catalog scanning 忽略；舊版 `.thumb` 也會被跳過，避免舊快取被掃進書庫。
 - EPUB 封面擷取支援：
   - OPF `meta name="cover" content="..."`
@@ -106,18 +111,14 @@ Makefile 預設流程：
 make
 ```
 
-## 建置 CLI
+## 建置 CLI（開發用途）
 
-目前平台：
+CLI 入口仍可用於開發與測試，但目前正式產出的 Windows 執行檔只產生 GUI 版 `dir2opds-gui.exe`。不要把 `dir2opds.exe` 當作發行產物。
+
+目前平台測試：
 
 ```bash
 go build .
-```
-
-Windows CLI：
-
-```bash
-GOOS=windows GOARCH=amd64 go build -o dir2opds.exe .
 ```
 
 全部 Makefile targets：
@@ -129,6 +130,8 @@ make build-all
 ## 建置 Windows GUI
 
 GUI 啟動器只支援 Windows。它透過 Go `syscall` 呼叫 Win32 API，不需要 Fyne、Wails、Node.js 或 C toolchain。
+
+目前發行 Windows 執行檔時，只產生這個 GUI 版本：
 
 在 Linux/macOS/WSL 交叉編譯：
 
@@ -152,27 +155,30 @@ go build -ldflags "-H=windowsgui" -o dir2opds-gui.exe ./cmd/dir2opds-gui
 
 ```bash
 cp docker-compose.example.yml docker-compose.yml
-docker compose up -d --build
+wsl bash -lc "cd /mnt/d/github/dir2opds && docker compose up -d --build dir2opds"
 ```
 
 `docker-compose.yml` 已加入 git ignore，避免把本機絕對路徑提交出去。
+
+在 Windows 開發環境重建 Docker 時，一律從 WSL 的 `/mnt/d/github/dir2opds` 執行 compose，避免 Windows/WSL 路徑解析不一致。
 
 範本預設啟用：
 
 ```text
 -enable-html
 -gzip
--extract-metadata
+-search
 ```
 
-範本不啟用 `-enable-cache`。
+範本不啟用 `-enable-cache`，也不預設啟用 `-extract-metadata`；需要書名、作者或封面時再取消註解。
 
 ## 測試重點
 
 修改行為時，請特別注意這些測試面：
 
 - 根目錄排序選項。
-- 搜尋排序選項。
+- 搜尋直接列出結果。
+- `By Type` 先列類型，再列選定類型的書。
 - 遞迴掃描後的扁平化書單。
 - 隱藏路徑行為：真實路徑只在 `Href`，不可出現在可見標題。
 - 支援副檔名過濾。
@@ -201,7 +207,7 @@ docker compose up -d --build
 
 1. 執行 `go fmt ./...`。
 2. 執行 `go test ./...`。
-3. 視需要建置 CLI。
-4. 視需要建置 Windows GUI。
+3. 需要 Windows 執行檔時，只建置 `dir2opds-gui.exe`。
+4. 不要產生或發佈 `dir2opds.exe`，除非明確需要非 GUI CLI 測試檔。
 5. 確認 `docker-compose.yml`、`books/`、`thumb/`、`*.exe` 沒有被 staged。
 6. 若 flags 或可見行為有變更，更新使用者文件。

@@ -2,13 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+Localized releases use tags such as `zhTW.v1.2`.
 
-## [1.9.0] - 2026-04-27
+## [zhTW.v1.2] - 2026-04-27
 
 ### Added
 
+- **Multi-library catalogs** — repeat `-library` to expose multiple book roots from one server.
+- **Type browsing** — `By Type` now opens a type list before showing books for the selected file type.
+- **Direct search results** — `/search?q=...` now lists matching books directly when no explicit sort is supplied.
+- **Traditional Chinese Docker Compose example** — compose comments now document single-library and multi-library setup.
 - **Browser detection and HTML view** — `-enable-html` flag to provide a modern, web-friendly interface when accessed via a web browser.
 - **No Pagination option** — `-no-pagination` flag to disable pagination and show all entries in a single feed.
 
@@ -16,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Pagination** — `-page-size` flag to control entries per page (default: 50, max: 200). Feeds include `first`, `previous`, `next`, `last` navigation links.
+- **Pagination** — `-page-size` flag to control entries per page (default: 50, max: 50). Feeds include `first`, `previous`, `next`, `last` navigation links.
 - **ETag/Last-Modified caching** — `-enable-cache` flag for conditional requests (304 Not Modified) to reduce bandwidth.
 - **Gzip compression** — `-gzip` flag to compress responses and reduce bandwidth.
 - **Health endpoint** — `/health` endpoint returning `{"status":"ok"}` for monitoring and load balancers.

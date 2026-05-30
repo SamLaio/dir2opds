@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/dubyte/dir2opds/internal/server"
+	"github.com/SamLaio/dir2opds/internal/server"
 )
 
 const (

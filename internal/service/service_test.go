@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dubyte/dir2opds/internal/service"
+	"github.com/SamLaio/dir2opds/internal/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -134,6 +134,130 @@ func TestFileServingUsesCustomMimeMap(t *testing.T) {
 	assert.Equal(t, "book", string(body))
 }
 
+func TestMultipleLibraries(t *testing.T) {
+	root := tempDirUnderWorkspace(t)
+	thumbDir := tempDirUnderWorkspace(t)
+	firstLibrary := filepath.Join(root, "fiction")
+	secondLibrary := filepath.Join(root, "comics")
+	require.NoError(t, os.Mkdir(firstLibrary, 0o755))
+	require.NoError(t, os.Mkdir(secondLibrary, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(firstLibrary, "alpha.epub"), []byte("alpha"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(secondLibrary, "beta.epub"), []byte("beta"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(secondLibrary, "beta.pdf"), []byte("pdf"), 0o644))
+
+	s := service.OPDS{
+		TrustedRoot: firstLibrary,
+		ThumbDir:    thumbDir,
+		SortBy:      "name",
+		Libraries: []service.Library{
+			{Name: "Fiction", Slug: "fiction", Path: firstLibrary},
+			{Name: "Comics", Slug: "comics", Path: secondLibrary},
+		},
+		EnableSearch: true,
+	}
+
+	t.Run("root lists libraries", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+		require.NoError(t, s.Handler(w, req))
+
+		body, err := io.ReadAll(w.Result().Body)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, w.Result().StatusCode)
+		assert.Contains(t, string(body), `<title>Fiction</title>`)
+		assert.Contains(t, string(body), `href="/fiction"`)
+		assert.Contains(t, string(body), `<title>Comics</title>`)
+		assert.NotContains(t, string(body), "alpha.epub")
+	})
+
+	t.Run("library root keeps prefixed book links", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/fiction?sort=name", nil)
+
+		require.NoError(t, s.Handler(w, req))
+
+		body, err := io.ReadAll(w.Result().Body)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, w.Result().StatusCode)
+		assert.Contains(t, string(body), `<title>alpha.epub</title>`)
+		assert.Contains(t, string(body), `href="/fiction/alpha.epub"`)
+		assert.NotContains(t, string(body), "beta.epub")
+	})
+
+	t.Run("serves files from selected library", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/comics/beta.epub", nil)
+
+		require.NoError(t, s.Handler(w, req))
+
+		body, err := io.ReadAll(w.Result().Body)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, w.Result().StatusCode)
+		assert.Equal(t, "beta", string(body))
+	})
+
+	t.Run("search spans libraries", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/search?q=beta&sort=name", nil)
+
+		require.NoError(t, s.SearchHandler(w, req))
+
+		body, err := io.ReadAll(w.Result().Body)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, w.Result().StatusCode)
+		assert.Contains(t, string(body), `<title>beta.epub</title>`)
+		assert.Contains(t, string(body), `href="/comics/beta.epub"`)
+		assert.NotContains(t, string(body), "alpha.epub")
+	})
+
+	t.Run("search without sort lists books directly", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/search?q=beta", nil)
+
+		require.NoError(t, s.SearchHandler(w, req))
+
+		body, err := io.ReadAll(w.Result().Body)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, w.Result().StatusCode)
+		assert.Contains(t, string(body), `<title>beta.epub</title>`)
+		assert.Contains(t, string(body), `href="/comics/beta.epub"`)
+		assert.NotContains(t, string(body), "By Name")
+		assert.NotContains(t, string(body), "By Date Added")
+	})
+
+	t.Run("type sort shows type choices first", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/?sort=type", nil)
+
+		require.NoError(t, s.Handler(w, req))
+
+		body, err := io.ReadAll(w.Result().Body)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, w.Result().StatusCode)
+		assert.Equal(t, "application/atom+xml;profile=opds-catalog;kind=navigation", w.Result().Header.Get("Content-Type"))
+		assert.Contains(t, string(body), `<title>EPUB</title>`)
+		assert.Contains(t, string(body), `href="/?sort=type&amp;type=epub"`)
+		assert.Contains(t, string(body), `<title>PDF</title>`)
+		assert.NotContains(t, string(body), `<title>alpha.epub</title>`)
+	})
+
+	t.Run("type filter lists only selected type", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/?sort=type&type=pdf", nil)
+
+		require.NoError(t, s.Handler(w, req))
+
+		body, err := io.ReadAll(w.Result().Body)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, w.Result().StatusCode)
+		assert.Equal(t, "application/atom+xml;profile=opds-catalog;kind=acquisition", w.Result().Header.Get("Content-Type"))
+		assert.Contains(t, string(body), `<title>beta.pdf</title>`)
+		assert.NotContains(t, string(body), `<title>alpha.epub</title>`)
+		assert.NotContains(t, string(body), `<title>beta.epub</title>`)
+	})
+}
+
 func TestSortSelectionFeed(t *testing.T) {
 	s := service.OPDS{
 		TrustedRoot:      "testdata",
@@ -157,6 +281,117 @@ func TestSortSelectionFeed(t *testing.T) {
 	assert.Contains(t, string(body), `href="/mybook?sort=name"`)
 	assert.Contains(t, string(body), `title="By Date Added"`)
 	assert.Contains(t, string(body), `href="/mybook?sort=date"`)
+	assert.Contains(t, string(body), `title="By Type"`)
+	assert.Contains(t, string(body), `href="/mybook?sort=type"`)
+}
+
+func TestTypeSelectionFeed(t *testing.T) {
+	s := service.OPDS{
+		TrustedRoot:      "testdata",
+		HideCalibreFiles: true,
+		HideDotFiles:     true,
+	}
+
+	t.Run("root type selection lists file types", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/?sort=type", nil)
+
+		err := s.Handler(w, req)
+		require.NoError(t, err)
+
+		resp := w.Result()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "application/atom+xml;profile=opds-catalog;kind=navigation", resp.Header.Get("Content-Type"))
+		assert.Contains(t, string(body), `<title>EPUB</title>`)
+		assert.Contains(t, string(body), `href="/?sort=type&amp;type=epub"`)
+		assert.Contains(t, string(body), `<title>PDF</title>`)
+		assert.NotContains(t, string(body), `<title>mybook.epub</title>`)
+	})
+
+	t.Run("root type filter lists selected type", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/?sort=type&type=pdf", nil)
+
+		err := s.Handler(w, req)
+		require.NoError(t, err)
+
+		resp := w.Result()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "application/atom+xml;profile=opds-catalog;kind=acquisition", resp.Header.Get("Content-Type"))
+		assert.Contains(t, string(body), `<title>mybook.pdf</title>`)
+		assert.NotContains(t, string(body), `<title>mybook.epub</title>`)
+		assert.NotContains(t, string(body), `<title>mybook copy.epub</title>`)
+	})
+
+	t.Run("directory type selection lists file types", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/mybook?sort=type", nil)
+
+		err := s.Handler(w, req)
+		require.NoError(t, err)
+
+		resp := w.Result()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "application/atom+xml;profile=opds-catalog;kind=navigation", resp.Header.Get("Content-Type"))
+		assert.Contains(t, string(body), `href="/mybook?sort=type&amp;type=epub"`)
+		assert.Contains(t, string(body), `href="/mybook?sort=type&amp;type=pdf"`)
+		assert.NotContains(t, string(body), `<title>mybook.epub</title>`)
+	})
+}
+
+func TestHTMLBreadcrumbIncludesSortContext(t *testing.T) {
+	tests := map[string][]string{
+		"/?sort=name": {
+			`<a href="/?sort=name">By Name</a>`,
+		},
+		"/?sort=date": {
+			`<a href="/?sort=date">By Date Added</a>`,
+		},
+		"/?sort=type": {
+			`<a href="/?sort=type">By Type</a>`,
+		},
+		"/?sort=type&type=pdf": {
+			`<a href="/?sort=type">By Type</a>`,
+			`<a href="/?sort=type&amp;type=pdf">PDF</a>`,
+		},
+	}
+
+	for target, wants := range tests {
+		t.Run(target, func(t *testing.T) {
+			s := service.OPDS{
+				TrustedRoot:      "testdata",
+				ThumbDir:         t.TempDir(),
+				HideCalibreFiles: true,
+				HideDotFiles:     true,
+				EnableHTML:       true,
+			}
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			req.Header.Set("Accept", "text/html")
+
+			err := s.Handler(w, req)
+			require.NoError(t, err)
+
+			resp := w.Result()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.Equal(t, "text/html; charset=utf-8", resp.Header.Get("Content-Type"))
+			for _, want := range wants {
+				assert.Contains(t, string(body), want)
+			}
+		})
+	}
 }
 
 func TestSortSelectionHTML(t *testing.T) {
@@ -184,8 +419,10 @@ func TestSortSelectionHTML(t *testing.T) {
 	assert.Equal(t, "text/html; charset=utf-8", resp.Header.Get("Content-Type"))
 	assert.Contains(t, string(body), "By Name")
 	assert.Contains(t, string(body), "By Date Added")
+	assert.Contains(t, string(body), "By Type")
 	assert.Contains(t, string(body), `href="/mybook?sort=name"`)
 	assert.Contains(t, string(body), `href="/mybook?sort=date"`)
+	assert.Contains(t, string(body), `href="/mybook?sort=type"`)
 	assert.NotContains(t, string(body), "mybook.epub")
 
 	cacheFiles, err := filepath.Glob(filepath.Join(thumbDir, "static-xml", "*.xml"))
@@ -195,6 +432,7 @@ func TestSortSelectionHTML(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(cachedXML), "<feed")
 	assert.Contains(t, string(cachedXML), "By Date Added")
+	assert.Contains(t, string(cachedXML), "By Type")
 }
 
 func TestSortSelectionHTMLBypassesConditionalCache(t *testing.T) {
@@ -221,6 +459,7 @@ func TestSortSelectionHTMLBypassesConditionalCache(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, string(body), "By Name")
 	assert.Contains(t, string(body), "By Date Added")
+	assert.Contains(t, string(body), "By Type")
 }
 
 func TestStaticXMLCacheRefreshesWhenDirectoryChanges(t *testing.T) {
@@ -311,11 +550,13 @@ func TestBaseURL(t *testing.T) {
 	assert.Contains(t, string(body), `href="https://opds.example.com/"`)
 	assert.Contains(t, string(body), `href="https://opds.example.com/?sort=name"`)
 	assert.Contains(t, string(body), `href="https://opds.example.com/?sort=date"`)
+	assert.Contains(t, string(body), `href="https://opds.example.com/?sort=type"`)
 
 	t.Run("Search with BaseURL", func(t *testing.T) {
 		s.EnableSearch = true
+		s.SortBy = "name"
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/search?q=mybook&sort=name", nil)
+		req := httptest.NewRequest(http.MethodGet, "/search?q=mybook", nil)
 
 		err := s.SearchHandler(w, req)
 		require.NoError(t, err)
@@ -327,6 +568,7 @@ func TestBaseURL(t *testing.T) {
 		assert.Contains(t, string(body), `href="https://opds.example.com/mybook/mybook.epub"`)
 		assert.Contains(t, string(body), `<title>mybook.epub</title>`)
 		assert.NotContains(t, string(body), `<title>mybook/mybook.epub</title>`)
+		assert.NotContains(t, string(body), "By Name")
 	})
 
 	t.Run("Search browser support", func(t *testing.T) {
@@ -461,6 +703,13 @@ var rootSortSelectionFeed = `<?xml version="1.0" encoding="UTF-8"?>
           <title>By Date Added</title>
           <id>/?sort=date</id>
           <link rel="subsection" href="/?sort=date" type="application/atom+xml;profile=opds-catalog;kind=acquisition" title="By Date Added"></link>
+          <published>2020-05-25T00:00:00+00:00</published>
+          <updated>2020-05-25T00:00:00+00:00</updated>
+      </entry>
+      <entry>
+          <title>By Type</title>
+          <id>/?sort=type</id>
+          <link rel="subsection" href="/?sort=type" type="application/atom+xml;profile=opds-catalog;kind=navigation" title="By Type"></link>
           <published>2020-05-25T00:00:00+00:00</published>
           <updated>2020-05-25T00:00:00+00:00</updated>
       </entry>

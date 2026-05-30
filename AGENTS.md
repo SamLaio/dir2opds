@@ -16,6 +16,15 @@ make build-all
 go build .
 ```
 
+### Build Artifacts
+- Do not automatically generate Windows `.exe` files unless the user explicitly asks to produce an executable.
+- When the user asks to produce the Windows executable, generate only `dir2opds-gui.exe` by default.
+- Do not generate or distribute `dir2opds.exe` unless the user explicitly asks for the non-GUI CLI executable.
+
+### Docker
+- When rebuilding or restarting Docker Compose for this repository, run it from WSL in `/mnt/d/github/dir2opds`.
+- Use the pattern `wsl bash -lc "cd /mnt/d/github/dir2opds && docker compose up -d --build dir2opds"` so relative compose paths resolve consistently.
+
 ### Testing
 ```bash
 # Run all tests
@@ -68,7 +77,7 @@ import (
     "github.com/lann/builder"
     "golang.org/x/tools/blog/atom"
     
-    "github.com/dubyte/dir2opds/opds"
+    "github.com/SamLaio/dir2opds/opds"
 )
 ```
 

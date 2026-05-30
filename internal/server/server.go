@@ -9,15 +9,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
-	"github.com/dubyte/dir2opds/internal/service"
+	"github.com/SamLaio/dir2opds/internal/service"
 )
+
+// LibraryConfig contains one configured book library before canonicalization.
+type LibraryConfig struct {
+	Name string
+	Path string
+}
 
 // Config contains runtime options for the OPDS HTTP server.
 type Config struct {
 	Host             string
 	Port             string
 	DirRoot          string
+	Libraries        []LibraryConfig
 	HideCalibreFiles bool
 	HideDotFiles     bool
 	NoCache          bool
@@ -77,18 +85,91 @@ func AbsoluteCanonicalPath(aPath string) (string, error) {
 	return aPath, nil
 }
 
+func canonicalLibraries(libraries []LibraryConfig) ([]service.Library, error) {
+	if len(libraries) == 0 {
+		return nil, nil
+	}
+
+	usedSlugs := make(map[string]int)
+	result := make([]service.Library, 0, len(libraries))
+	for idx, library := range libraries {
+		absolutePath, err := AbsoluteCanonicalPath(library.Path)
+		if err != nil {
+			return nil, err
+		}
+
+		name := strings.TrimSpace(library.Name)
+		if name == "" {
+			name = filepath.Base(absolutePath)
+		}
+		if name == "" || name == "." || name == string(filepath.Separator) {
+			name = fmt.Sprintf("Library %d", idx+1)
+		}
+
+		baseSlug := librarySlug(name)
+		count := usedSlugs[baseSlug]
+		usedSlugs[baseSlug] = count + 1
+		slug := baseSlug
+		if count > 0 {
+			slug = fmt.Sprintf("%s-%d", baseSlug, count+1)
+		}
+
+		result = append(result, service.Library{
+			Name: name,
+			Slug: slug,
+			Path: absolutePath,
+		})
+	}
+	return result, nil
+}
+
+func librarySlug(name string) string {
+	var b strings.Builder
+	lastWasDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+			lastWasDash = false
+		case r == '-' || r == '_' || unicode.IsSpace(r):
+			if !lastWasDash && b.Len() > 0 {
+				b.WriteByte('-')
+				lastWasDash = true
+			}
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" {
+		return "library"
+	}
+	return slug
+}
+
 // NewHandler creates the HTTP handler for a configured OPDS service.
 func NewHandler(cfg Config) (http.Handler, string, error) {
-	absolutePath, err := AbsoluteCanonicalPath(cfg.DirRoot)
+	libraries, err := canonicalLibraries(cfg.Libraries)
 	if err != nil {
 		return nil, "", err
 	}
 
-	slog.Info("trusted root", "path", absolutePath)
+	absolutePath := ""
+	if len(libraries) > 0 {
+		absolutePath = libraries[0].Path
+		for _, library := range libraries {
+			slog.Info("trusted library", "name", library.Name, "slug", library.Slug, "path", library.Path)
+		}
+	} else {
+		absolutePath, err = AbsoluteCanonicalPath(cfg.DirRoot)
+		if err != nil {
+			return nil, "", err
+		}
+		slog.Info("trusted root", "path", absolutePath)
+	}
 
 	s := service.OPDS{
 		TrustedRoot:      absolutePath,
 		ThumbDir:         filepath.Join(absolutePath, "thumb"),
+		Libraries:        libraries,
 		HideCalibreFiles: cfg.HideCalibreFiles,
 		HideDotFiles:     cfg.HideDotFiles,
 		NoCache:          cfg.NoCache,

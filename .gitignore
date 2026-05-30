@@ -48,3 +48,4 @@ oldOnline.docker.yml
 .cache
 todo.txt
 AGENTS.md
+RELEASE_NOTES*.md

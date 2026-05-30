@@ -29,7 +29,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dubyte/dir2opds/opds"
+	"github.com/SamLaio/dir2opds/opds"
 	"golang.org/x/tools/blog/atom"
 )
 
@@ -76,8 +76,8 @@ const (
 	defaultPageSize     = 50
 	maxPageSize         = 50
 	backgroundBatchSize = 50
-	bookIndexVersion    = 3
-	staticXMLVersion    = 3
+	bookIndexVersion    = 4
+	staticXMLVersion    = 5
 
 	maxCoverReadBytes        = 8 * 1024 * 1024
 	maxPDFImageScanBytes     = 16 * 1024 * 1024
@@ -118,6 +118,8 @@ var diskBookIndexMu sync.Mutex
 type OPDS struct {
 	TrustedRoot      string
 	ThumbDir         string
+	Libraries        []Library
+	URLPrefix        string
 	HideCalibreFiles bool
 	HideDotFiles     bool
 	NoCache          bool
@@ -125,6 +127,7 @@ type OPDS struct {
 	SortBy           string
 	ShowCovers       bool
 	MimeMap          map[string]string
+	TypeFilter       string
 	EnableSearch     bool
 	ExtractMetadata  bool
 	CoverWarmup      bool
@@ -132,6 +135,13 @@ type OPDS struct {
 	BaseURL          string
 	PageSize         int
 	NoPagination     bool
+}
+
+// Library describes one configured book library.
+type Library struct {
+	Name string
+	Slug string
+	Path string
 }
 
 type bookIndexFingerprint struct {
@@ -246,6 +256,116 @@ func etag(urlPath string, modTime time.Time, page int) string {
 	return `"` + hex.EncodeToString(h.Sum(nil))[:16] + `"`
 }
 
+func (s OPDS) hasLibraries() bool {
+	return len(s.Libraries) > 0 && s.URLPrefix == ""
+}
+
+func (s OPDS) libraryThumbDir(library Library) string {
+	slug := library.Slug
+	if slug == "" {
+		slug = library.Name
+	}
+	if slug == "" {
+		slug = "library"
+	}
+	return filepath.Join(s.thumbDir(), "libraries", slug)
+}
+
+func (s OPDS) forLibrary(library Library) OPDS {
+	next := s
+	next.TrustedRoot = library.Path
+	next.ThumbDir = s.libraryThumbDir(library)
+	next.Libraries = nil
+	next.URLPrefix = "/" + strings.Trim(strings.TrimSpace(library.Slug), "/")
+	if next.URLPrefix == "/" {
+		next.URLPrefix = "/" + strings.Trim(strings.TrimSpace(library.Name), "/")
+	}
+	return next
+}
+
+func (s OPDS) trimURLPrefix(urlPath string) (string, bool) {
+	if urlPath == "" {
+		urlPath = "/"
+	}
+	if !strings.HasPrefix(urlPath, "/") {
+		urlPath = "/" + urlPath
+	}
+
+	prefix := strings.TrimRight(s.URLPrefix, "/")
+	if prefix == "" {
+		return urlPath, true
+	}
+	if urlPath == prefix {
+		return "/", true
+	}
+	if strings.HasPrefix(urlPath, prefix+"/") {
+		return strings.TrimPrefix(urlPath, prefix), true
+	}
+	return "", false
+}
+
+func (s OPDS) resolveLibraryURLPath(urlPath string) (Library, string, bool) {
+	if urlPath == "" {
+		urlPath = "/"
+	}
+	if !strings.HasPrefix(urlPath, "/") {
+		urlPath = "/" + urlPath
+	}
+	cleanURLPath := path.Clean(urlPath)
+	if cleanURLPath == "/" {
+		return Library{}, "", false
+	}
+
+	parts := strings.Split(strings.TrimPrefix(cleanURLPath, "/"), "/")
+	slug := parts[0]
+	rest := "/"
+	if len(parts) > 1 {
+		rest = "/" + strings.Join(parts[1:], "/")
+	}
+	for _, library := range s.Libraries {
+		if library.Slug == slug {
+			return library, rest, true
+		}
+	}
+	return Library{}, "", false
+}
+
+func (s OPDS) filePathForURLPath(urlPath string) (string, error) {
+	if urlPath == "" {
+		urlPath = "/"
+	}
+	if !strings.HasPrefix(urlPath, "/") {
+		urlPath = "/" + urlPath
+	}
+
+	if s.hasLibraries() {
+		library, rest, ok := s.resolveLibraryURLPath(urlPath)
+		if !ok {
+			return "", fmt.Errorf("library not found for path %s", urlPath)
+		}
+		fPath := filepath.Join(library.Path, filepath.FromSlash(strings.TrimPrefix(rest, "/")))
+		return verifyPath(fPath, library.Path)
+	}
+
+	fsURLPath, ok := s.trimURLPrefix(urlPath)
+	if !ok {
+		return "", fmt.Errorf("path %s is outside URL prefix %s", urlPath, s.URLPrefix)
+	}
+	fPath := filepath.Join(s.TrustedRoot, filepath.FromSlash(strings.TrimPrefix(fsURLPath, "/")))
+	return verifyPath(fPath, s.TrustedRoot)
+}
+
+func (s OPDS) urlPathForRel(relPath string) string {
+	relPath = strings.TrimPrefix(filepath.ToSlash(relPath), "/")
+	if s.URLPrefix == "" {
+		return "/" + relPath
+	}
+	if relPath == "" {
+		return s.URLPrefix
+	}
+	return path.Join(s.URLPrefix, relPath)
+}
+
 func (s OPDS) Scan(fPath string, urlPath string, page int) (*Catalog, error) {
 	if s.ExtractMetadata {
 		cleanupThumbCache(s.thumbDir())
@@ -286,6 +406,9 @@ func (s OPDS) Scan(fPath string, urlPath string, page int) (*Catalog, error) {
 		}
 
 		if !entry.IsDir() && !isSupportedBookFile(entry.Name()) {
+			continue
+		}
+		if !entry.IsDir() && !entryMatchesBookType(entry.Name(), s.TypeFilter) {
 			continue
 		}
 
@@ -348,11 +471,15 @@ func (s OPDS) enrichVisibleEntries(catalog *Catalog, rootPath, urlPath string) {
 
 		entryPath := filepath.Join(rootPath, catalog.Entries[idx].Name)
 		if catalog.Entries[idx].Href != "" {
-			if hrefPath, err := url.PathUnescape(strings.TrimPrefix(catalog.Entries[idx].Href, "/")); err == nil {
-				entryPath = filepath.Join(s.TrustedRoot, filepath.FromSlash(hrefPath))
+			if hrefPath, err := url.PathUnescape(catalog.Entries[idx].Href); err == nil {
+				if resolvedPath, err := s.filePathForURLPath(hrefPath); err == nil {
+					entryPath = resolvedPath
+				}
 			}
 		} else if urlPath != "" {
-			entryPath = filepath.Join(s.TrustedRoot, filepath.FromSlash(strings.TrimPrefix(path.Join(urlPath, catalog.Entries[idx].Name), "/")))
+			if resolvedPath, err := s.filePathForURLPath(path.Join(urlPath, catalog.Entries[idx].Name)); err == nil {
+				entryPath = resolvedPath
+			}
 		}
 
 		title, author, coverPath := extractMetadata(entryPath)
@@ -375,6 +502,25 @@ func (s OPDS) enrichVisibleEntries(catalog *Catalog, rootPath, urlPath string) {
 func (s OPDS) WarmBookIndex() {
 	go func() {
 		start := time.Now()
+		if s.hasLibraries() {
+			total := 0
+			for _, library := range s.Libraries {
+				meta, err := s.forLibrary(library).ensureDiskBookIndex(library.Path)
+				if err != nil {
+					slog.Error("book index warmup failed", "library", library.Name, "error", err)
+					return
+				}
+				total += meta.Count
+			}
+			slog.Info("book indexes warmed", "libraries", len(s.Libraries), "entries", total, "duration", time.Since(start).String())
+			if s.ExtractMetadata && s.CoverWarmup {
+				for _, library := range s.Libraries {
+					s.forLibrary(library).warmBookCoversInBatches(backgroundBatchSize)
+				}
+			}
+			return
+		}
+
 		meta, err := s.ensureDiskBookIndex(s.TrustedRoot)
 		if err != nil {
 			slog.Error("book index warmup failed", "error", err)
@@ -431,11 +577,14 @@ func (s OPDS) warmBookCoversInBatches(batchSize int) {
 func (s OPDS) processCoverWarmupBatch(batch []diskBookRecord, batchNumber int) int {
 	processed := 0
 	for _, record := range batch {
-		hrefPath, err := url.PathUnescape(strings.TrimPrefix(record.Href, "/"))
+		hrefPath, err := url.PathUnescape(record.Href)
 		if err != nil {
 			continue
 		}
-		sourcePath := filepath.Join(s.TrustedRoot, filepath.FromSlash(hrefPath))
+		sourcePath, err := s.filePathForURLPath(hrefPath)
+		if err != nil {
+			continue
+		}
 		if _, err := ensureCachedCover(s.thumbDir(), sourcePath); err != nil {
 			slog.Debug("book cover warmup skipped cover", "path", sourcePath, "error", err)
 		}
@@ -539,7 +688,7 @@ func (s OPDS) scanBookEntries(rootPath string) ([]CatalogEntry, bookIndexFingerp
 		entries = append(entries, CatalogEntry{
 			Name:    info.Name(),
 			Type:    pathTypeFile,
-			Href:    "/" + filepath.ToSlash(relPath),
+			Href:    s.urlPathForRel(relPath),
 			ModTime: info.ModTime(),
 			Size:    info.Size(),
 		})
@@ -565,6 +714,8 @@ func (s OPDS) diskBookIndexPath(sortBy string) string {
 	switch sortBy {
 	case "date":
 		return s.diskBookIndexBase() + ".date.jsonl"
+	case "type":
+		return s.diskBookIndexBase() + ".type.jsonl"
 	default:
 		return s.diskBookIndexBase() + ".name.jsonl"
 	}
@@ -619,7 +770,9 @@ func (s OPDS) ensureDiskBookIndex(rootPath string) (diskBookIndexMeta, error) {
 	if existing, err := s.readDiskBookIndexMeta(); err == nil && existing.matches(expected) {
 		if _, err := os.Stat(s.diskBookIndexPath("name")); err == nil {
 			if _, err := os.Stat(s.diskBookIndexPath("date")); err == nil {
-				return existing, nil
+				if _, err := os.Stat(s.diskBookIndexPath("type")); err == nil {
+					return existing, nil
+				}
 			}
 		}
 	}
@@ -651,6 +804,13 @@ func (s OPDS) writeDiskBookIndexes(entries []CatalogEntry, meta diskBookIndexMet
 		return entries[i].ModTime.After(entries[j].ModTime)
 	})
 	if err := s.writeDiskBookIndexFile(s.diskBookIndexPath("date"), entries); err != nil {
+		return err
+	}
+
+	byType := make([]CatalogEntry, len(entries))
+	copy(byType, entries)
+	sortEntriesByType(byType)
+	if err := s.writeDiskBookIndexFile(s.diskBookIndexPath("type"), byType); err != nil {
 		return err
 	}
 
@@ -701,7 +861,7 @@ func diskBookRecordToCatalogEntry(record diskBookRecord) CatalogEntry {
 	}
 }
 
-func (s OPDS) readDiskBookIndexPage(rootPath, sortBy string, page, pageSize int, query string) ([]CatalogEntry, int, time.Time, error) {
+func (s OPDS) readDiskBookIndexPage(rootPath, sortBy string, page, pageSize int, query string, fileType string) ([]CatalogEntry, int, time.Time, error) {
 	meta, err := s.ensureDiskBookIndex(rootPath)
 	if err != nil {
 		return nil, 0, time.Time{}, err
@@ -732,6 +892,9 @@ func (s OPDS) readDiskBookIndexPage(rootPath, sortBy string, page, pageSize int,
 		if queryLower != "" && !strings.Contains(strings.ToLower(record.Name), queryLower) {
 			continue
 		}
+		if !entryMatchesBookType(record.Name, fileType) {
+			continue
+		}
 		if total >= start && total < end {
 			entries = append(entries, diskBookRecordToCatalogEntry(record))
 		}
@@ -741,10 +904,45 @@ func (s OPDS) readDiskBookIndexPage(rootPath, sortBy string, page, pageSize int,
 		return nil, 0, time.Time{}, err
 	}
 
-	if query == "" {
+	if query == "" && normalizeBookType(fileType) == "" {
 		total = meta.Count
 	}
 	return entries, total, time.Unix(0, meta.LatestModTime), nil
+}
+
+func (s OPDS) readDiskBookIndexEntries(rootPath, sortBy string, query string, fileType string) ([]CatalogEntry, time.Time, error) {
+	meta, err := s.ensureDiskBookIndex(rootPath)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	f, err := os.Open(s.diskBookIndexPath(sortBy))
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer f.Close()
+
+	queryLower := strings.ToLower(query)
+	var entries []CatalogEntry
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var record diskBookRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			return nil, time.Time{}, err
+		}
+		if queryLower != "" && !strings.Contains(strings.ToLower(record.Name), queryLower) {
+			continue
+		}
+		if !entryMatchesBookType(record.Name, fileType) {
+			continue
+		}
+		entries = append(entries, diskBookRecordToCatalogEntry(record))
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, time.Time{}, err
+	}
+	return entries, time.Unix(0, meta.LatestModTime), nil
 }
 
 func extractMetadata(path string) (string, string, string) {
@@ -1154,11 +1352,24 @@ func (s OPDS) sortEntries(entries []CatalogEntry) {
 		sort.Slice(entries, func(i, j int) bool {
 			return entries[i].Size > entries[j].Size
 		})
+	case "type":
+		sortEntriesByType(entries)
 	default: // name
 		sort.Slice(entries, func(i, j int) bool {
 			return entries[i].Name < entries[j].Name
 		})
 	}
+}
+
+func sortEntriesByType(entries []CatalogEntry) {
+	sort.Slice(entries, func(i, j int) bool {
+		leftExt := strings.ToLower(filepath.Ext(entries[i].Name))
+		rightExt := strings.ToLower(filepath.Ext(entries[j].Name))
+		if leftExt != rightExt {
+			return leftExt < rightExt
+		}
+		return entries[i].Name < entries[j].Name
+	})
 }
 
 func isBrowser(r *http.Request) bool {
@@ -1372,6 +1583,19 @@ func (s OPDS) staticXMLCacheMeta(req *http.Request) (staticXMLCacheMeta, error) 
 }
 
 func (s OPDS) staticXMLFingerprint(req *http.Request) (string, int, time.Time, string, int, error) {
+	if s.hasLibraries() {
+		if req.URL.Path == "/" && req.URL.Query().Get("sort") == "" {
+			return s.librariesStaticXMLFingerprint()
+		}
+		if req.URL.Path == "/search" || req.URL.Path == "/" {
+			fingerprint, err := s.multiLibraryBookFingerprint()
+			if err != nil {
+				return "", 0, time.Time{}, "", 0, err
+			}
+			return "book-index", fingerprint.Count, fingerprint.LatestModTime, fingerprint.Hash, pathTypeDirOfFiles, nil
+		}
+	}
+
 	if req.URL.Path == "/search" || (req.URL.Path == "/" && req.URL.Query().Get("sort") != "") {
 		fingerprint, err := s.scanBookFingerprint(s.TrustedRoot)
 		if err != nil {
@@ -1384,11 +1608,46 @@ func (s OPDS) staticXMLFingerprint(req *http.Request) (string, int, time.Time, s
 	if err != nil {
 		return "", 0, time.Time{}, "", 0, err
 	}
-	fPath := filepath.Join(s.TrustedRoot, filepath.FromSlash(strings.TrimPrefix(urlPath, "/")))
-	if _, err := verifyPath(fPath, s.TrustedRoot); err != nil {
+	fPath, err := s.filePathForURLPath(urlPath)
+	if err != nil {
 		return "", 0, time.Time{}, "", 0, err
 	}
 	return s.directoryStaticXMLFingerprint(fPath)
+}
+
+func (s OPDS) librariesStaticXMLFingerprint() (string, int, time.Time, string, int, error) {
+	h := sha256.New()
+	var latestModTime time.Time
+	for _, library := range s.Libraries {
+		info, err := os.Stat(library.Path)
+		if err != nil {
+			return "", 0, time.Time{}, "", 0, err
+		}
+		if latestModTime.IsZero() || info.ModTime().After(latestModTime) {
+			latestModTime = info.ModTime()
+		}
+		writeFingerprintEntry(h, library.Slug+"\x00"+library.Name+"\x00"+library.Path, pathTypeDirOfDirs, 0, info.ModTime())
+	}
+	return "libraries", len(s.Libraries), latestModTime, hex.EncodeToString(h.Sum(nil)), pathTypeDirOfDirs, nil
+}
+
+func (s OPDS) multiLibraryBookFingerprint() (bookIndexFingerprint, error) {
+	var fingerprint bookIndexFingerprint
+	h := sha256.New()
+	for _, library := range s.Libraries {
+		libraryFingerprint, err := s.forLibrary(library).scanBookFingerprint(library.Path)
+		if err != nil {
+			return bookIndexFingerprint{}, err
+		}
+		fingerprint.Count += libraryFingerprint.Count
+		if fingerprint.LatestModTime.IsZero() || libraryFingerprint.LatestModTime.After(fingerprint.LatestModTime) {
+			fingerprint.LatestModTime = libraryFingerprint.LatestModTime
+		}
+		writeFingerprintEntry(h, library.Slug, pathTypeDirOfFiles, int64(libraryFingerprint.Count), libraryFingerprint.LatestModTime)
+		_, _ = io.WriteString(h, libraryFingerprint.Hash)
+	}
+	fingerprint.Hash = hex.EncodeToString(h.Sum(nil))
+	return fingerprint, nil
 }
 
 func (s OPDS) directoryStaticXMLFingerprint(fPath string) (string, int, time.Time, string, int, error) {
@@ -1458,10 +1717,99 @@ func (s OPDS) clearStaticXMLCache() {
 	}
 }
 
+func (s OPDS) multiLibraryHandler(w http.ResponseWriter, req *http.Request) error {
+	urlPath, err := url.PathUnescape(req.URL.Path)
+	if err != nil {
+		slog.Error("error unescaping path", "urlPath", req.URL.Path, "error", err)
+		return err
+	}
+
+	if urlPath == "/" {
+		if s.NoCache {
+			w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.Header().Add("Expires", "0")
+		}
+		if s.renderStaticXMLCacheAsHTML(w, req) || s.serveStaticXMLCache(w, req) {
+			return nil
+		}
+
+		sortBy := req.URL.Query().Get("sort")
+		if sortBy == "" {
+			catalog := s.makeLibrariesCatalog()
+			if s.EnableHTML && isBrowser(req) {
+				if err := s.writeCatalogStaticXMLCache(req, catalog); err != nil {
+					return err
+				}
+				return s.renderHTML(w, req, catalog)
+			}
+			return s.serveCatalogFeed(w, req, catalog)
+		}
+
+		if sortBy == "type" && normalizeBookType(req.URL.Query().Get("type")) == "" {
+			catalog, err := s.collectMultiBookTypeCatalog("/", "Types in /", "", req)
+			if err != nil {
+				return err
+			}
+			if s.EnableHTML && isBrowser(req) {
+				if err := s.writeCatalogStaticXMLCache(req, catalog); err != nil {
+					return err
+				}
+				return s.renderHTML(w, req, catalog)
+			}
+			return s.serveCatalogFeed(w, req, catalog)
+		}
+
+		typeService := s
+		typeService.TypeFilter = req.URL.Query().Get("type")
+		catalog, err := typeService.collectMultiBookCatalog("/", "Catalog in /", pageFromRequest(req), sortBy, "")
+		if err != nil {
+			return err
+		}
+		if s.EnableHTML && isBrowser(req) {
+			if err := s.writeCatalogStaticXMLCache(req, catalog); err != nil {
+				return err
+			}
+			return s.renderHTML(w, req, catalog)
+		}
+		return s.serveCatalogFeed(w, req, catalog)
+	}
+
+	library, _, ok := s.resolveLibraryURLPath(urlPath)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return nil
+	}
+	return s.forLibrary(library).Handler(w, req)
+}
+
+func (s OPDS) makeLibrariesCatalog() *Catalog {
+	catalog := &Catalog{
+		ID:       "/",
+		Title:    "Libraries",
+		Type:     pathTypeDirOfDirs,
+		Total:    len(s.Libraries),
+		Page:     1,
+		PageSize: len(s.Libraries),
+		ModTime:  TimeNow(),
+	}
+	for _, library := range s.Libraries {
+		catalog.Entries = append(catalog.Entries, CatalogEntry{
+			Name: library.Name,
+			Type: pathTypeDirOfDirs,
+			Href: "/" + library.Slug,
+		})
+	}
+	return catalog
+}
+
 // Handler serves the content of a book file or
 // returns an Acquisition Feed when the entries are documents or
 // returns a Navigation Feed when the entries are other folders
 func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
+	if s.hasLibraries() {
+		return s.multiLibraryHandler(w, req)
+	}
+
 	var err error
 	urlPath, err := url.PathUnescape(req.URL.Path)
 	if err != nil {
@@ -1469,10 +1817,8 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 		return err
 	}
 
-	fPath := filepath.Join(s.TrustedRoot, filepath.FromSlash(strings.TrimPrefix(urlPath, "/")))
-
 	// verifyPath avoid the http transversal by checking the path is under DirRoot
-	_, err = verifyPath(fPath, s.TrustedRoot)
+	fPath, err := s.filePathForURLPath(urlPath)
 	if err != nil {
 		slog.Debug("verify path rejected request", "path", req.URL.Path, "error", err)
 		w.WriteHeader(http.StatusNotFound)
@@ -1504,7 +1850,8 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 	}
 
 	query := req.URL.Query()
-	if urlPath == "/" {
+	fsURLPath, _ := s.trimURLPrefix(urlPath)
+	if fsURLPath == "/" {
 		if query.Get("sort") == "" {
 			if s.EnableHTML && isBrowser(req) {
 				if err := s.writeSortSelectionStaticXMLCache(req); err != nil {
@@ -1515,7 +1862,23 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 			return s.serveSortSelectionFeed(w, req)
 		}
 
-		catalog, err := s.collectBookCatalog(fPath, urlPath, "Catalog in "+urlPath, pageFromRequest(req), query.Get("sort"), "")
+		if query.Get("sort") == "type" && normalizeBookType(query.Get("type")) == "" {
+			catalog, err := s.collectBookTypeCatalog(fPath, urlPath, "Types in "+urlPath, "", req)
+			if err != nil {
+				return err
+			}
+			if s.EnableHTML && isBrowser(req) {
+				if err := s.writeCatalogStaticXMLCache(req, catalog); err != nil {
+					return err
+				}
+				return s.renderHTML(w, req, catalog)
+			}
+			return s.serveCatalogFeed(w, req, catalog)
+		}
+
+		typeService := s
+		typeService.TypeFilter = query.Get("type")
+		catalog, err := typeService.collectBookCatalog(fPath, urlPath, "Catalog in "+urlPath, pageFromRequest(req), query.Get("sort"), "")
 		if err != nil {
 			return err
 		}
@@ -1536,6 +1899,22 @@ func (s OPDS) Handler(w http.ResponseWriter, req *http.Request) error {
 	page := parsePage(query.Get("page"))
 	scanService := s
 	scanService.SortBy = sortBy
+	scanService.TypeFilter = query.Get("type")
+
+	if pathType == pathTypeDirOfFiles && sortBy == "type" && normalizeBookType(query.Get("type")) == "" {
+		catalog, err := s.collectDirectoryTypeCatalog(fPath, urlPath, req)
+		if err != nil {
+			return err
+		}
+		if s.EnableHTML && isBrowser(req) {
+			if err := s.writeCatalogStaticXMLCache(req, catalog); err != nil {
+				return err
+			}
+			return s.renderHTML(w, req, catalog)
+		}
+		return s.serveCatalogFeed(w, req, catalog)
+	}
+
 	catalog, err := scanService.Scan(fPath, urlPath, page)
 	if err != nil {
 		slog.Error("error scanning path", "error", err)
@@ -1648,22 +2027,55 @@ func pageFromRequest(req *http.Request) int {
 
 func buildSortURL(basePath string, query url.Values, sortBy string) string {
 	query.Set("sort", sortBy)
+	query.Del("type")
 	query.Del("page")
 	return basePath + "?" + query.Encode()
+}
+
+func buildTypeURL(basePath string, query url.Values, fileType string) string {
+	query.Set("sort", "type")
+	query.Set("type", normalizeBookType(fileType))
+	query.Del("page")
+	return basePath + "?" + query.Encode()
+}
+
+func normalizeBookType(fileType string) string {
+	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(fileType)), ".")
+}
+
+func entryMatchesBookType(name string, fileType string) bool {
+	normalized := normalizeBookType(fileType)
+	if normalized == "" {
+		return true
+	}
+	return normalizeBookType(filepath.Ext(name)) == normalized
+}
+
+func bookTypeTitle(fileType string) string {
+	normalized := normalizeBookType(fileType)
+	if normalized == "" {
+		return "Unknown"
+	}
+	return strings.ToUpper(normalized)
+}
+
+func bookTypeFromName(name string) string {
+	return normalizeBookType(filepath.Ext(name))
 }
 
 func (s OPDS) makeSortSelectionCatalog(req *http.Request) *Catalog {
 	query := req.URL.Query()
 	nameURL := buildSortURL(req.URL.Path, query, "name")
 	dateURL := buildSortURL(req.URL.Path, query, "date")
+	typeURL := buildSortURL(req.URL.Path, query, "type")
 
 	return &Catalog{
 		ID:       req.URL.Path,
 		Title:    "Sort catalog",
 		Type:     pathTypeDirOfDirs,
-		Total:    2,
+		Total:    3,
 		Page:     1,
-		PageSize: 2,
+		PageSize: 3,
 		Entries: []CatalogEntry{
 			{
 				Name: "By Name",
@@ -1674,6 +2086,11 @@ func (s OPDS) makeSortSelectionCatalog(req *http.Request) *Catalog {
 				Name: "By Date Added",
 				Type: pathTypeDirOfFiles,
 				Href: dateURL,
+			},
+			{
+				Name: "By Type",
+				Type: pathTypeDirOfDirs,
+				Href: typeURL,
 			},
 		},
 	}
@@ -1693,6 +2110,7 @@ func (s OPDS) makeSortSelectionFeed(req *http.Request) atom.Feed {
 
 	nameURL := s.joinURL(buildSortURL(req.URL.Path, query, "name"))
 	dateURL := s.joinURL(buildSortURL(req.URL.Path, query, "date"))
+	typeURL := s.joinURL(buildSortURL(req.URL.Path, query, "type"))
 
 	feedBuilder = feedBuilder.AddEntry(opds.EntryBuilder.
 		ID(nameURL).
@@ -1720,6 +2138,19 @@ func (s OPDS) makeSortSelectionFeed(req *http.Request) atom.Feed {
 			Build()).
 		Build())
 
+	feedBuilder = feedBuilder.AddEntry(opds.EntryBuilder.
+		ID(typeURL).
+		Title("By Type").
+		Published(updated).
+		Updated(updated).
+		AddLink(opds.LinkBuilder.
+			Rel("subsection").
+			Title("By Type").
+			Href(typeURL).
+			Type(navigationType).
+			Build()).
+		Build())
+
 	return feedBuilder.Build()
 }
 
@@ -1732,7 +2163,7 @@ func (s OPDS) collectBookCatalog(rootPath, urlPath, title string, page int, sort
 		PageSize: s.pageSize(),
 	}
 
-	entries, total, modTime, err := s.readDiskBookIndexPage(rootPath, sortBy, page, catalog.PageSize, query)
+	entries, total, modTime, err := s.readDiskBookIndexPage(rootPath, sortBy, page, catalog.PageSize, query, s.TypeFilter)
 	if err != nil {
 		return nil, err
 	}
@@ -1743,6 +2174,157 @@ func (s OPDS) collectBookCatalog(rootPath, urlPath, title string, page int, sort
 	catalog.Entries = entries
 	s.enrichVisibleEntries(catalog, rootPath, urlPath)
 	return catalog, nil
+}
+
+func (s OPDS) collectBookTypeCatalog(rootPath, urlPath, title, query string, req *http.Request) (*Catalog, error) {
+	entries, modTime, err := s.readDiskBookIndexEntries(rootPath, "type", query, "")
+	if err != nil {
+		return nil, err
+	}
+	return s.makeTypeSelectionCatalog(req, urlPath, title, entries, modTime), nil
+}
+
+func (s OPDS) collectMultiBookCatalog(urlPath, title string, page int, sortBy string, query string) (*Catalog, error) {
+	catalog := &Catalog{
+		ID:       urlPath,
+		Title:    title,
+		Type:     pathTypeDirOfFiles,
+		Page:     page,
+		PageSize: s.pageSize(),
+	}
+
+	var entries []CatalogEntry
+	for _, library := range s.Libraries {
+		libraryService := s.forLibrary(library)
+		libraryEntries, modTime, err := libraryService.readDiskBookIndexEntries(library.Path, sortBy, query, s.TypeFilter)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, libraryEntries...)
+		if catalog.ModTime.IsZero() || modTime.After(catalog.ModTime) {
+			catalog.ModTime = modTime
+		}
+	}
+
+	sortService := s
+	sortService.SortBy = sortBy
+	sortService.sortEntries(entries)
+
+	total := len(entries)
+	pageSize := catalog.PageSize
+	if page < 1 {
+		page = 1
+	}
+	if s.NoPagination {
+		pageSize = total
+		if pageSize == 0 {
+			pageSize = 1
+		}
+	}
+
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+
+	catalog.Total = total
+	catalog.Page = page
+	catalog.PageSize = pageSize
+	catalog.Entries = entries[start:end]
+	s.enrichVisibleEntries(catalog, "", urlPath)
+	return catalog, nil
+}
+
+func (s OPDS) collectMultiBookTypeCatalog(urlPath, title, query string, req *http.Request) (*Catalog, error) {
+	var entries []CatalogEntry
+	var modTime time.Time
+	for _, library := range s.Libraries {
+		libraryService := s.forLibrary(library)
+		libraryEntries, libraryModTime, err := libraryService.readDiskBookIndexEntries(library.Path, "type", query, "")
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, libraryEntries...)
+		if modTime.IsZero() || libraryModTime.After(modTime) {
+			modTime = libraryModTime
+		}
+	}
+	return s.makeTypeSelectionCatalog(req, urlPath, title, entries, modTime), nil
+}
+
+func (s OPDS) collectDirectoryTypeCatalog(fPath, urlPath string, req *http.Request) (*Catalog, error) {
+	dirEntries, err := os.ReadDir(fPath)
+	if err != nil {
+		return nil, err
+	}
+	dirInfo, err := os.Stat(fPath)
+	if err != nil {
+		return nil, err
+	}
+
+	entries := make([]CatalogEntry, 0)
+	modTime := dirInfo.ModTime()
+	for _, entry := range dirEntries {
+		if entry.IsDir() || fileShouldBeIgnored(entry.Name(), s.HideCalibreFiles, s.HideDotFiles) || !isSupportedBookFile(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			slog.Debug("error getting info for type catalog entry", "path", filepath.Join(fPath, entry.Name()), "error", err)
+			continue
+		}
+		if info.ModTime().After(modTime) {
+			modTime = info.ModTime()
+		}
+		entries = append(entries, CatalogEntry{Name: entry.Name(), Type: pathTypeFile, ModTime: info.ModTime(), Size: info.Size()})
+	}
+	return s.makeTypeSelectionCatalog(req, urlPath, "Types in "+urlPath, entries, modTime), nil
+}
+
+func (s OPDS) makeTypeSelectionCatalog(req *http.Request, urlPath, title string, entries []CatalogEntry, modTime time.Time) *Catalog {
+	counts := make(map[string]int)
+	for _, entry := range entries {
+		fileType := bookTypeFromName(entry.Name)
+		if fileType == "" {
+			continue
+		}
+		counts[fileType]++
+	}
+
+	fileTypes := make([]string, 0, len(counts))
+	for fileType := range counts {
+		fileTypes = append(fileTypes, fileType)
+	}
+	sort.Strings(fileTypes)
+
+	catalog := &Catalog{
+		ID:       urlPath,
+		Title:    title,
+		Type:     pathTypeDirOfDirs,
+		Total:    len(fileTypes),
+		Page:     1,
+		PageSize: len(fileTypes),
+		ModTime:  modTime,
+	}
+	if catalog.PageSize == 0 {
+		catalog.PageSize = 1
+	}
+
+	query := req.URL.Query()
+	for _, fileType := range fileTypes {
+		title := bookTypeTitle(fileType)
+		catalog.Entries = append(catalog.Entries, CatalogEntry{
+			Name:  fmt.Sprintf("%s (%d)", title, counts[fileType]),
+			Title: title,
+			Type:  pathTypeDirOfFiles,
+			Href:  buildTypeURL(req.URL.Path, query, fileType),
+		})
+	}
+	return catalog
 }
 
 // SearchHandler performs a basic filename search
@@ -1758,16 +2340,39 @@ func (s OPDS) SearchHandler(w http.ResponseWriter, req *http.Request) error {
 
 	sortBy := req.URL.Query().Get("sort")
 	if sortBy == "" {
+		sortBy = s.SortBy
+	}
+	fileType := req.URL.Query().Get("type")
+
+	if sortBy == "type" && normalizeBookType(fileType) == "" {
+		var catalog *Catalog
+		var err error
+		if s.hasLibraries() {
+			catalog, err = s.collectMultiBookTypeCatalog("search:"+query, "Types for: "+query, query, req)
+		} else {
+			catalog, err = s.collectBookTypeCatalog(s.TrustedRoot, "search:"+query, "Types for: "+query, query, req)
+		}
+		if err != nil {
+			return err
+		}
 		if s.EnableHTML && isBrowser(req) {
-			if err := s.writeSortSelectionStaticXMLCache(req); err != nil {
+			if err := s.writeCatalogStaticXMLCache(req, catalog); err != nil {
 				return err
 			}
-			return s.renderHTML(w, req, s.makeSortSelectionCatalog(req))
+			return s.renderHTML(w, req, catalog)
 		}
-		return s.serveSortSelectionFeed(w, req)
+		return s.serveCatalogFeed(w, req, catalog)
 	}
 
-	catalog, err := s.collectBookCatalog(s.TrustedRoot, "search:"+query, "Search results for: "+query, pageFromRequest(req), sortBy, query)
+	var catalog *Catalog
+	var err error
+	typeService := s
+	typeService.TypeFilter = fileType
+	if s.hasLibraries() {
+		catalog, err = typeService.collectMultiBookCatalog("search:"+query, "Search results for: "+query, pageFromRequest(req), sortBy, query)
+	} else {
+		catalog, err = typeService.collectBookCatalog(s.TrustedRoot, "search:"+query, "Search results for: "+query, pageFromRequest(req), sortBy, query)
+	}
 	if err != nil {
 		return err
 	}
@@ -1816,10 +2421,8 @@ func (s OPDS) CoverHandler(w http.ResponseWriter, req *http.Request) error {
 		return err
 	}
 
-	fPath := filepath.Join(s.TrustedRoot, urlPath)
-
 	// verifyPath avoid the http transversal by checking the path is under TrustedRoot
-	_, err = verifyPath(fPath, s.TrustedRoot)
+	fPath, err := s.filePathForURLPath(urlPath)
 	if err != nil {
 		slog.Debug("verify path rejected cover request", "file", filePath, "error", err)
 		w.WriteHeader(http.StatusNotFound)
@@ -2218,6 +2821,9 @@ func (s OPDS) makeFeed(catalog *Catalog, req *http.Request) atom.Feed {
 		}
 
 		href := s.joinURL((&url.URL{Path: entryPath}).String())
+		if entry.Href != "" && strings.Contains(entryPath, "?") {
+			href = s.joinURL(entryPath)
+		}
 
 		entryBuilder := opds.EntryBuilder.
 			ID(href).

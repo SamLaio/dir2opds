@@ -1,10 +1,10 @@
 # Contributing
 
 1. Sign one of the contributor license agreements below.
-1. [Install Go](https://golang.org/doc/install).
+1. [Install Go 1.25.3 or newer](https://go.dev/doc/install).
 1. Clone the repo:
 
-   `git clone https://github.com/dubyte/dir2opds.git`
+   `git clone https://github.com/SamLaio/dir2opds.git`
 
 1. Change into the checked out source:
 

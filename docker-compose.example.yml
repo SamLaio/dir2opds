@@ -1,24 +1,74 @@
 services:
   dir2opds:
+    # 從此 repository 建立映像檔。
     build:
       context: .
       dockerfile: Containerfile
     container_name: dir2opds
+
+    # 主機 port 8080 對應到容器內 port 8080。
+    # 如果主機的 8080 已被占用，請修改左側數字。
     ports:
       - "8080:8080"
+
     volumes:
-      # Put your books under ./books, or replace ./books with an absolute path.
-      - ./books:/books
+      # 多書庫範例：
+      # 每個書庫各自掛載到容器內不同路徑；左側可改成本機絕對路徑。
+      # 右側是容器內看到的路徑，會在下方 -library 參數使用。
+      - ./books/fiction:/library/fiction
+      - ./books/comics:/library/comics
+      - ./books/magazines:/library/magazines
+
+      # 單書庫範例：
+      # 如果只需要一個書庫，請註解上方三個掛載，並取消註解這一行。
+      # 同時也要把下方 command 從 -library 切換成 -dir。
+      # - ./books:/books
+
     command:
-      - -dir
-      - /books
+      # 多書庫模式：
+      # 每個要顯示在首頁的書庫都重複指定一次 -library。
+      # 格式：顯示名稱=/容器內路徑
+      # 顯示名稱會成為 OPDS/HTML 書庫入口的名稱。
+      - -library
+      - Fiction=/library/fiction
+      - -library
+      - Comics=/library/comics
+      - -library
+      - Magazines=/library/magazines
+
+      # 單書庫模式：
+      # 如果要改用單書庫，請註解上方所有 -library 參數，並取消註解這兩行：
+      # - -dir
+      # - /books
+
+      # 容器內 HTTP port，需與上方 ports 的右側數字一致。
       - -port
       - "8080"
+
+      # 啟用瀏覽器友善的 HTML 介面。
       - -enable-html
+
+      # 壓縮 OPDS/HTML 回應。
       - -gzip
+
+      # 啟用 /search 與 /opensearch.xml。
+      - -search
+
+      # 直接顯示書單或搜尋結果時的預設排序或分類方式。
+      # 可用值：date、name、type、size；type 會先顯示檔案類型清單。
+      # - -sort
+      # - date
+
+      # 啟用 ETag 與 Last-Modified 條件式快取。
+      # 對 OPDS client 有幫助；若瀏覽器重新整理容易看到舊頁面，可先不要啟用。
+      # - -enable-cache
+
       # 只有需要顯示書名、作者或封面時才啟用 metadata 擷取。
       # 這會讀取書籍壓縮檔，可能增加 Linux filesystem cache。
       # - -extract-metadata
+
       # 只有明確想在啟動時預先掃描全部封面時才啟用封面暖機。
+      # 需要同時啟用 -extract-metadata。
       # - -cover-warmup
+
     restart: unless-stopped

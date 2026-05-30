@@ -1,4 +1,4 @@
-module github.com/dubyte/dir2opds
+module github.com/SamLaio/dir2opds
 
 go 1.25.3
 

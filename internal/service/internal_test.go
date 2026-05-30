@@ -94,6 +94,21 @@ func TestSortEntries(t *testing.T) {
 	s.SortBy = "date"
 	s.sortEntries(entries)
 	assert.Equal(t, "A", entries[0].Name) // Newest first
+
+	typeEntries := []CatalogEntry{
+		{Name: "z.pdf"},
+		{Name: "b.epub"},
+		{Name: "a.cbz"},
+		{Name: "a.epub"},
+	}
+	s.SortBy = "type"
+	s.sortEntries(typeEntries)
+	assert.Equal(t, []string{"a.cbz", "a.epub", "b.epub", "z.pdf"}, []string{
+		typeEntries[0].Name,
+		typeEntries[1].Name,
+		typeEntries[2].Name,
+		typeEntries[3].Name,
+	})
 }
 
 func TestExtractMetadata(t *testing.T) {
