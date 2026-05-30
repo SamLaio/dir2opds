@@ -47,3 +47,4 @@ pushDocker.bat
 oldOnline.docker.yml
 .cache
 todo.txt
+AGENTS.md
