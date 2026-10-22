@@ -11,7 +11,14 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/SamLaio/dir2opds/internal/server"
 )
+
+func TestSearchEnabledByDefault(t *testing.T) {
+	assert.True(t, server.DefaultConfig().EnableSearch)
+	assert.True(t, *searchEnable)
+}
 
 func TestStartValues(t *testing.T) {
 	// pre-setup

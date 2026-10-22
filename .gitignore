@@ -49,3 +49,8 @@ oldOnline.docker.yml
 todo.txt
 AGENTS.md
 RELEASE_NOTES*.md
+/release/
+/.cleanup/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

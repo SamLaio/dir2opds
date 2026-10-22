@@ -209,5 +209,6 @@ wsl bash -lc "cd /mnt/d/github/dir2opds && docker compose up -d --build dir2opds
 2. 執行 `go test ./...`。
 3. 需要 Windows 執行檔時，只建置 `dir2opds-gui.exe`。
 4. 不要產生或發佈 `dir2opds.exe`，除非明確需要非 GUI CLI 測試檔。
-5. 確認 `docker-compose.yml`、`books/`、`thumb/`、`*.exe` 沒有被 staged。
+5. 將發布附檔與非空的 `RELEASE_NOTES.md` 放在本機 `release/[版號]/`；資料夾名稱必須與 tag 完全一致。整個 `release/` 保持由 Git 忽略，不強制加入、不提交。確認 `docker-compose.yml`、`books/`、`thumb/` 及 EXE 沒有被 staged。
 6. 若 flags 或可見行為有變更，更新使用者文件。
+7. 每次 commit 遞增版號；推送時一併推送對應 tag。測試通過後，在本機執行 `pwsh -File scripts/publish-release.ps1 -Version [版號]`，以本機說明建立 GitHub Release 並直接上傳附檔；需 PowerShell 7 和已登入的 GitHub CLI。缺少說明或附檔會停止發布，tag 必須已存在於遠端。GitHub Actions 不讀取本機發布資料夾，也不再從 checkout 自動發布。

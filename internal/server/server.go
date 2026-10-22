@@ -46,11 +46,12 @@ type Config struct {
 // DefaultConfig returns the default runtime options used by the CLI and GUI.
 func DefaultConfig() Config {
 	return Config{
-		Host:     "0.0.0.0",
-		Port:     "8080",
-		DirRoot:  "./books",
-		SortBy:   "date",
-		PageSize: 50,
+		Host:         "0.0.0.0",
+		Port:         "8080",
+		DirRoot:      "./books",
+		SortBy:       "date",
+		PageSize:     50,
+		EnableSearch: true,
 	}
 }
 

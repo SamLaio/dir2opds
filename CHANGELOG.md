@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Localized releases use tags such as `zhTW.v1.2`.
 
+## [zhTW.v1.3] - 2026-10-23
+
+### Changed
+
+- Enable filename search by default for the CLI and GUI; use `-search=false` to disable it in the CLI.
+- Keep versioned release artifacts and notes local under gitignored `release/<version>/`.
+- Replace tag-triggered GoReleaser publishing with `scripts/publish-release.ps1`, which uploads local notes and attachments directly to GitHub Releases after the tag is pushed.
+- Document version increments, README verification before commits, and release preparation rules.
+
 ## [zhTW.v1.2] - 2026-04-27
 
 ### Added

@@ -79,7 +79,7 @@ var (
 	sortBy       = flag.String("sort", "date", "Sort entries by: name, date, type, size.")
 	showCovers   = flag.Bool("show-covers", false, "Show cover.jpg or folder.jpg as catalog cover.")
 	mimeMapStr   = flag.String("mime-map", "", "Custom mime types (e.g., '.mobi:application/x-mobipocket-ebook,.azw3:application/vnd.amazon.ebook')")
-	searchEnable = flag.Bool("search", false, "Enable basic filename search.")
+	searchEnable = flag.Bool("search", server.DefaultConfig().EnableSearch, "Enable basic filename search.")
 	extractMeta  = flag.Bool("extract-metadata", false, "Extract title/author metadata and covers where supported.")
 	coverWarmup  = flag.Bool("cover-warmup", false, "Pre-extract covers in the background when metadata extraction is enabled.")
 	enableHTML   = flag.Bool("enable-html", false, "Enable web-friendly HTML view for browsers.")

@@ -1,5 +1,7 @@
 # dir2opds
 
+目前原始碼版本：`zhTW.v1.3`。CLI 與 GUI 預設啟用檔名搜尋，CLI 可用 `-search=false` 關閉；既有版本的執行檔不會隨原始碼更新。
+
 dir2opds 可以把本機的書籍資料夾轉成 OPDS 書庫，並提供簡單的瀏覽器 HTML 介面。它適合個人書庫使用，讓你可以用 OPDS app、手機、平板、電子書閱讀器或瀏覽器，在區網內瀏覽與下載書籍。
 
 ## 功能
@@ -8,7 +10,7 @@ dir2opds 可以把本機的書籍資料夾轉成 OPDS 書庫，並提供簡單�
 - 提供一般瀏覽器可看的 HTML 介面。
 - 提供 Windows GUI 啟動器。
 - 可用命令列或 Docker 執行。
-- 可依檔名搜尋書庫。
+- 預設可依檔名搜尋書庫（不包含作者或書籍全文搜尋）。
 - 書庫只列出預設允許的書籍副檔名：
   - `.azw`、`.azw3`、`.azw4`
   - `.cbr`、`.cbz`、`.zip`
@@ -38,6 +40,8 @@ books/thumb/
 搜尋會在輸入字串後直接顯示符合條件的書籍，不需要再選排序。
 
 ## Windows GUI
+
+發布檔案統一放在本機的 `release/[版號]/`，整個資料夾由 Git 忽略，不提交到原始碼儲存庫。測試通過並推送同名版號 tag 後，執行 `pwsh -File scripts/publish-release.ps1 -Version [版號]`，會自動以該資料夾的 `RELEASE_NOTES.md` 作為 GitHub Release 說明，並直接上傳資料夾內所有檔案作為附檔。資料夾只能放預計公開發布的檔案；發布需安裝 PowerShell 7、GitHub CLI 並登入有發布權限的帳號。
 
 如果不想使用命令列，可以直接使用 `dir2opds-gui.exe`。
 
@@ -184,7 +188,7 @@ azw, azw3, azw4, cbr, cbz, djv, djvu, epub, fb2, kepub, kfx, lit, mobi, pdf, prc
 | `-enable-html` | 啟用瀏覽器 HTML 介面。 |
 | `-gzip` | 壓縮回應內容。 |
 | `-extract-metadata` | 擷取可支援格式的書名、作者與封面；書名/作者支援 EPUB/PDF，封面支援 EPUB、CBZ/ZIP、PDF。 |
-| `-search` | 啟用 OPDS/OpenSearch 搜尋端點。 |
+| `-search` | 預設啟用檔名搜尋及 OPDS/OpenSearch 搜尋端點；可用 `-search=false` 關閉。 |
 | `-sort` | 預設排序或分類方式，可用 `name`、`date`、`type`、`size`；`type` 會先顯示檔案類型清單。 |
 | `-calibre` | 隱藏 Calibre 產生的 `metadata.opf`。 |
 | `-hide-dot-files` | 隱藏以 `.` 開頭的檔案與資料夾。 |

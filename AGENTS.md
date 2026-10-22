@@ -19,6 +19,9 @@ go build .
 ### Build Artifacts
 - Do not automatically generate Windows `.exe` files unless the user explicitly asks to produce an executable.
 - When the user asks to produce the Windows executable, generate only `dir2opds-gui.exe` by default.
+- Place compiled Windows `.exe` files in `release/<version>/` under the repository root (for example, `release/1.2.3/dir2opds-gui.exe`), using the version being built.
+- Place all release deliverables for the same version in that `release/<version>/` directory, including executables for other platforms, distribution archives, installers, and accompanying release files.
+- Before publishing a release, review and update the README, usage instructions, and release notes so documented features, defaults, options, and limitations match the actual behavior of that version. Do not describe planned or unsupported functionality as available.
 - Do not generate or distribute `dir2opds.exe` unless the user explicitly asks for the non-GUI CLI executable.
 
 ### Docker
@@ -146,6 +149,12 @@ The project uses `github.com/lann/builder` for immutable builders:
 - Comments should start with the name being documented
 
 ### Commit Messages
+Before every commit, review and update the README so its feature descriptions, defaults, options, and limitations match the actual code being committed. Increment the version for every commit using the repository's existing version naming convention, and keep version references consistent across the README, changelog, and release notes where present.
+
+Every push must include a version tag pointing to the commit being pushed. Follow the repository's existing version naming convention, use a new version for new changes, and push the tag together with the commits. Never overwrite an existing version tag.
+Before every push, prepare a non-empty local `release/<version>/RELEASE_NOTES.md` describing that version's actual changes and limitations, along with its intended release attachments. The version directory must exactly match the tag. The entire `release/` directory stays local and gitignored; never force-add or commit its contents.
+After tests pass and the version tag is pushed, publish from the local machine with `pwsh -File scripts/publish-release.ps1 -Version <version>`. This uploads the local Markdown as the GitHub Release description and all files in that version directory as release assets, without adding them to Git history. Only intended public release files belong in this directory. GitHub Actions cannot read these local files and must not attempt to publish them from a checkout.
+
 Follow [Conventional Commits](https://www.conventionalcommits.org/):
 - `feat: add new feature`
 - `fix: resolve bug`
