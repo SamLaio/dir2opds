@@ -93,7 +93,7 @@ http://192.168.x.x:8080/
 
 其他平台若需要執行檔，請自行從原始碼建置。這屬於開發者流程，不是目前提供的正式安裝包。
 
-需要 [Go 1.25.3+](https://go.dev/doc/install)。
+需要 [Go 1.27.4+](https://go.dev/doc/install)。
 
 ```bash
 go build .

@@ -7,3 +7,19 @@ dist
 tmp
 *.log
 docker-compose.yml
+
+# Exclude local artifacts and tooling caches.
+release/
+bin/
+graft/
+.opencode/
+.cleanup/
+dir2opds
+*.exe
+*.test
+.history/
+.vscode/
+epub/
+todo.txt
+oldOnline.docker.yml
+pushDocker.bat

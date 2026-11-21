@@ -17,7 +17,7 @@ go build .
 ```
 
 ### Build Artifacts
-- Do not automatically generate Windows `.exe` files unless the user explicitly asks to produce an executable.
+- Generate Windows `.exe` files when explicitly requested or as part of the required pre-commit build below.
 - When the user asks to produce the Windows executable, generate only `dir2opds-gui.exe` by default.
 - Place compiled Windows `.exe` files in `release/<version>/` under the repository root (for example, `release/1.2.3/dir2opds-gui.exe`), using the version being built.
 - Place all release deliverables for the same version in that `release/<version>/` directory, including executables for other platforms, distribution archives, installers, and accompanying release files.
@@ -27,6 +27,10 @@ go build .
 ### Docker
 - When rebuilding or restarting Docker Compose for this repository, run it from WSL in `/mnt/d/github/dir2opds`.
 - Use the pattern `wsl bash -lc "cd /mnt/d/github/dir2opds && docker compose up -d --build dir2opds"` so relative compose paths resolve consistently.
+
+### GitHub CLI
+- GitHub CLI (`gh`) is installed locally and available for GitHub operations, including release publishing and asset uploads; do not ask the user to install it.
+- Explicitly select the intended repository with `--repo SamLaio/dir2opds` or `GH_REPO=SamLaio/dir2opds` when running GitHub operations for this project, so `gh` does not accidentally select the upstream repository.
 
 ### Testing
 ```bash
@@ -64,7 +68,7 @@ make clean
 ### General Go Conventions
 - Follow standard Go formatting (`go fmt`)
 - Pass `go vet` without warnings
-- Use Go 1.25.3+ (see go.mod)
+- Use Go 1.27.4+ (see go.mod)
 - Maximum line length: aim for readability, no strict limit
 
 ### Imports
@@ -150,6 +154,7 @@ The project uses `github.com/lann/builder` for immutable builders:
 
 ### Commit Messages
 Before every commit, review and update the README so its feature descriptions, defaults, options, and limitations match the actual code being committed. Increment the version for every commit using the repository's existing version naming convention, and keep version references consistent across the README, changelog, and release notes where present.
+Before every commit, build the Windows GUI executable for the new version into `release/<version>/dir2opds-gui.exe` using `CGO_ENABLED=0`, `GOOS=windows`, `GOARCH=amd64`, and `go build -ldflags="-H=windowsgui" -o release/<version>/dir2opds-gui.exe ./cmd/dir2opds-gui`. A successful build is required before committing. Keep the executable local and gitignored; do not generate the CLI executable unless explicitly requested.
 
 Every push must include a version tag pointing to the commit being pushed. Follow the repository's existing version naming convention, use a new version for new changes, and push the tag together with the commits. Never overwrite an existing version tag.
 Before every push, prepare a non-empty local `release/<version>/RELEASE_NOTES.md` describing that version's actual changes and limitations, along with its intended release attachments. The version directory must exactly match the tag. The entire `release/` directory stays local and gitignored; never force-add or commit its contents.

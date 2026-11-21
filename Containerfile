@@ -1,12 +1,13 @@
-# Stage 1: Build
-FROM docker.io/golang:1.25.3-alpine AS builder
+# Keep the builder version aligned with go.mod.
+FROM docker.io/golang:1.27.4-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -o /app/dir2opds
+# The scratch runtime has no libc; always build a static binary.
+RUN CGO_ENABLED=0 go build -o /app/dir2opds
 
-# Stage 2: Final Image
-FROM docker.io/alpine
+# No shell, OS packages, CA certificates or temporary directory.
+FROM scratch
 COPY --from=builder /app/dir2opds /dir2opds
 ENTRYPOINT ["/dir2opds"]

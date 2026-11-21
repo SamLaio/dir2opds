@@ -85,7 +85,7 @@ CLI 或 GUI
 
 ## 建置與測試
 
-使用 Go 1.25.3 或更新版本。
+使用 Go 1.27.4 或更新版本。
 
 執行全部測試：
 
@@ -207,7 +207,7 @@ wsl bash -lc "cd /mnt/d/github/dir2opds && docker compose up -d --build dir2opds
 
 1. 執行 `go fmt ./...`。
 2. 執行 `go test ./...`。
-3. 需要 Windows 執行檔時，只建置 `dir2opds-gui.exe`。
+3. 每次 commit 前，必須將新版本 Windows amd64 GUI 編譯至 `release/[版號]/dir2opds-gui.exe`，成功後才可提交。設定 `CGO_ENABLED=0`、`GOOS=windows`、`GOARCH=amd64`，執行 `go build -ldflags="-H=windowsgui" -o release/[版號]/dir2opds-gui.exe ./cmd/dir2opds-gui`；EXE 保留本機，不提交到 Git。
 4. 不要產生或發佈 `dir2opds.exe`，除非明確需要非 GUI CLI 測試檔。
 5. 將發布附檔與非空的 `RELEASE_NOTES.md` 放在本機 `release/[版號]/`；資料夾名稱必須與 tag 完全一致。整個 `release/` 保持由 Git 忽略，不強制加入、不提交。確認 `docker-compose.yml`、`books/`、`thumb/` 及 EXE 沒有被 staged。
 6. 若 flags 或可見行為有變更，更新使用者文件。

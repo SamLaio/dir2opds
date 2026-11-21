@@ -1,6 +1,6 @@
 # dir2opds
 
-目前原始碼版本：`zhTW.v1.3`。CLI 與 GUI 預設啟用檔名搜尋，CLI 可用 `-search=false` 關閉；既有版本的執行檔不會隨原始碼更新。
+目前原始碼版本：`zhTW.v1.4`。CLI 與 GUI 預設啟用檔名搜尋，CLI 可用 `-search=false` 關閉；既有版本的執行檔不會隨原始碼更新。
 
 dir2opds 可以把本機的書籍資料夾轉成 OPDS 書庫，並提供簡單的瀏覽器 HTML 介面。它適合個人書庫使用，讓你可以用 OPDS app、手機、平板、電子書閱讀器或瀏覽器，在區網內瀏覽與下載書籍。
 
@@ -191,7 +191,7 @@ azw, azw3, azw4, cbr, cbz, djv, djvu, epub, fb2, kepub, kfx, lit, mobi, pdf, prc
 | `-search` | 預設啟用檔名搜尋及 OPDS/OpenSearch 搜尋端點；可用 `-search=false` 關閉。 |
 | `-sort` | 預設排序或分類方式，可用 `name`、`date`、`type`、`size`；`type` 會先顯示檔案類型清單。 |
 | `-calibre` | 隱藏 Calibre 產生的 `metadata.opf`。 |
-| `-hide-dot-files` | 隱藏以 `.` 開頭的檔案與資料夾。 |
+| `-hide-dot-files` | 隱藏以 `.` 開頭的檔案與資料夾，並拒絕直接下載及封面請求。 |
 | `-show-covers` | 將資料夾內的 `cover.jpg` 或 `folder.jpg` 作為 catalog cover。 |
 | `-mime-map` | 自訂副檔名 MIME type，例如 `.mobi:application/x-mobipocket-ebook`。 |
 | `-enable-cache` | 啟用 ETag 與 Last-Modified。 |
@@ -218,3 +218,13 @@ GET /health
 ## 開發者文件
 
 請見 [README.DEVELOPMENT.md](README.DEVELOPMENT.md)。
+
+## 安全限制
+
+建置需 Go 1.27.4 或更新的受支援版本。HTTP 標頭讀取逾時為 10 秒、請求讀取逾時為 30 秒、閒置連線逾時為 60 秒；不設固定的回應寫入總期限，以支援大型書籍下載。
+
+隱藏規則會檢查路徑各層及符號連結目標；`-calibre` 隱藏的檔案亦拒絕直接存取，`thumb` 與 `.thumb` 快取目錄不開放直接下載。EPUB 的每份 OPF／封面 HTML 解壓後最多 4 MiB，封面圖片最多 8 MiB；超限時略過 metadata 或回報封面讀取錯誤，原始書籍仍可下載。
+
+服務沒有內建登入驗證，預設監聽 `0.0.0.0`。非公開書庫應限制防火牆來源，或透過具備驗證與 HTTPS 的反向代理提供服務。
+
+Docker runtime 使用 `scratch`，僅含靜態執行檔，沒有 shell、套件管理員或 CA 憑證；不能用 `docker exec ... sh` 除錯。請掛載書庫目錄（程式會在書庫的 `thumb` 寫入快取），並用 `/health` 與容器 log 檢查狀態。CI 會執行 Windows/Linux 測試、vet、阻擋式漏洞掃描與容器健康／下載檢查，發布仍由本機執行。

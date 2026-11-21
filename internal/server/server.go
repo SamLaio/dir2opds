@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/SamLaio/dir2opds/internal/service"
@@ -223,8 +224,11 @@ func NewHTTPServer(cfg Config) (*http.Server, string, error) {
 
 	addr := cfg.Host + ":" + cfg.Port
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: handler,
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	urlHost := cfg.Host

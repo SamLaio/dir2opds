@@ -79,6 +79,7 @@ const (
 	bookIndexVersion    = 4
 	staticXMLVersion    = 5
 
+	maxEPUBTextBytes         = 4 * 1024 * 1024
 	maxCoverReadBytes        = 8 * 1024 * 1024
 	maxPDFImageScanBytes     = 16 * 1024 * 1024
 	maxPDFEmbeddedImageBytes = maxCoverReadBytes
@@ -344,7 +345,7 @@ func (s OPDS) filePathForURLPath(urlPath string) (string, error) {
 			return "", fmt.Errorf("library not found for path %s", urlPath)
 		}
 		fPath := filepath.Join(library.Path, filepath.FromSlash(strings.TrimPrefix(rest, "/")))
-		return verifyPath(fPath, library.Path)
+		return s.verifyVisiblePath(fPath, library.Path)
 	}
 
 	fsURLPath, ok := s.trimURLPrefix(urlPath)
@@ -352,7 +353,27 @@ func (s OPDS) filePathForURLPath(urlPath string) (string, error) {
 		return "", fmt.Errorf("path %s is outside URL prefix %s", urlPath, s.URLPrefix)
 	}
 	fPath := filepath.Join(s.TrustedRoot, filepath.FromSlash(strings.TrimPrefix(fsURLPath, "/")))
-	return verifyPath(fPath, s.TrustedRoot)
+	return s.verifyVisiblePath(fPath, s.TrustedRoot)
+}
+
+func (s OPDS) verifyVisiblePath(filePath, root string) (string, error) {
+	resolved, err := verifyPath(filePath, root)
+	if err != nil {
+		return "", err
+	}
+	// Check both names so aliases cannot expose hidden targets.
+	for _, candidate := range []string{filePath, resolved} {
+		rel, err := filepath.Rel(root, candidate)
+		if err != nil {
+			return "", err
+		}
+		for _, part := range strings.Split(rel, string(filepath.Separator)) {
+			if fileShouldBeIgnored(part, s.HideCalibreFiles, s.HideDotFiles) {
+				return "", errors.New("hidden path")
+			}
+		}
+	}
+	return resolved, nil
 }
 
 func (s OPDS) urlPathForRel(relPath string) string {
@@ -1101,7 +1122,7 @@ func extractEpubMetadata(path string) (string, string, string) {
 	}
 	defer f.Close()
 
-	opfContent, err := io.ReadAll(f)
+	opfContent, err := readLimitedEPUBText(f)
 	if err != nil {
 		return "", "", ""
 	}
@@ -1243,7 +1264,7 @@ func coverPathFromHTML(r *zip.Reader, opfDir, htmlPath string) string {
 	}
 	defer f.Close()
 
-	content, err := io.ReadAll(f)
+	content, err := readLimitedEPUBText(f)
 	if err != nil {
 		return ""
 	}
@@ -2487,7 +2508,7 @@ func extractEpubCover(epubPath string) ([]byte, string, error) {
 	}
 	defer f.Close()
 
-	opfContent, err := io.ReadAll(f)
+	opfContent, err := readLimitedEPUBText(f)
 	if err != nil {
 		return nil, "", fmt.Errorf("reading OPF: %w", err)
 	}
@@ -2558,6 +2579,17 @@ func extractFirstImageFromZip(zipPath string) ([]byte, string, error) {
 	}
 
 	return nil, "", nil
+}
+
+func readLimitedEPUBText(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxEPUBTextBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxEPUBTextBytes {
+		return nil, fmt.Errorf("EPUB text is larger than %d bytes", maxEPUBTextBytes)
+	}
+	return data, nil
 }
 
 func readLimitedCover(r io.Reader) ([]byte, error) {

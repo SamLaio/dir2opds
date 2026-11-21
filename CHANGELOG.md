@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Localized releases use tags such as `zhTW.v1.2`.
 
+## [zhTW.v1.4] - 2026-11-21
+
+### Security
+
+- Upgrade Go to 1.27.4 and refresh dependencies.
+- Apply hidden-path rules to direct downloads and cover requests, including hidden ancestors and symlink targets.
+- Limit decompressed EPUB OPF/cover HTML to 4 MiB per entry; retain the 8 MiB cover image limit.
+- Set HTTP header/read/idle timeouts to 10/30/60 seconds without a fixed response write timeout.
+
+### Changed
+
+- Use a scratch container with an explicitly static binary and exclude local release artifacts from its build context.
+- Add Windows/Linux CI tests, vet, blocking vulnerability checks, and container health/download smoke tests; read the Go version from go.mod.
+- Exclude unsupported windows/arm targets from the legacy GoReleaser configuration.
+- Keep public release publication local; CI does not publish release assets.
+
 ## [zhTW.v1.3] - 2026-10-23
 
 ### Changed

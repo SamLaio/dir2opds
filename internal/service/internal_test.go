@@ -426,3 +426,51 @@ func readTestOPF(t *testing.T, r *zip.Reader, opfPath string) ([]epubManifestIte
 	require.NoError(t, xml.NewDecoder(strings.NewReader(string(content))).Decode(&opf))
 	return opf.Manifest.Items, opf.Metadata.Meta
 }
+
+func TestEPUBTextLimit(t *testing.T) {
+	for _, size := range []int{maxEPUBTextBytes - 1, maxEPUBTextBytes, maxEPUBTextBytes + 1} {
+		data, err := readLimitedEPUBText(strings.NewReader(strings.Repeat("x", size)))
+		if size > maxEPUBTextBytes {
+			require.Error(t, err)
+			assert.Nil(t, data)
+		} else {
+			require.NoError(t, err)
+			assert.Len(t, data, size)
+		}
+	}
+}
+
+func TestOversizedEPUBText(t *testing.T) {
+	oversized := strings.Repeat(" ", maxEPUBTextBytes+1)
+	epub := filepath.Join(t.TempDir(), "large.epub")
+	createTestEPUB(t, epub, map[string]string{"content.opf": oversized})
+	title, author, cover := extractEpubMetadata(epub)
+	assert.Empty(t, title)
+	assert.Empty(t, author)
+	assert.Empty(t, cover)
+	_, _, err := extractEpubCover(epub)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "EPUB text is larger")
+
+	createTestEPUB(t, epub, map[string]string{
+		"cover.xhtml": oversized + `<html><img src="cover.jpg"/></html>`,
+		"cover.jpg":   "cover",
+	})
+	r, err := zip.OpenReader(epub)
+	require.NoError(t, err)
+	defer r.Close()
+	assert.Empty(t, coverPathFromHTML(&r.Reader, "", "cover.xhtml"))
+}
+
+func TestHiddenSymlinkTarget(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".secret"), []byte("secret"), 0600))
+	alias := filepath.Join(root, "public.txt")
+	if err := os.Symlink(filepath.Join(root, ".secret"), alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	s := OPDS{TrustedRoot: root, HideDotFiles: true}
+	_, err = s.filePathForURLPath("/public.txt")
+	require.Error(t, err)
+}
